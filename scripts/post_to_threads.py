@@ -50,11 +50,15 @@ def fetch_ranking_items() -> list:
     params = {
         "applicationId": app_id,
         "affiliateId": affiliate_id,
+        "genreId": 0,
         "format": "json",
         "page": 1,
     }
 
     resp = requests.get(RAKUTEN_RANKING_URL, params=params, timeout=30)
+    if resp.status_code != 200:
+        print(f"楽天APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
+        print(resp.text, file=sys.stderr)
     resp.raise_for_status()
     data = resp.json()
 
