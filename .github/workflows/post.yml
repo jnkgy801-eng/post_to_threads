@@ -2,10 +2,12 @@ name: Rakuten to Threads Auto Post
 
 on:
   schedule:
-    # JST 9:00 / 13:00 / 19:00 = UTC 0:00 / 4:00 / 10:00
-    - cron: "0 0 * * *"
-    - cron: "0 4 * * *"
+    # JST 12:00 / 19:00 / 21:00 / 22:00 = UTC 3:00 / 10:00 / 12:00 / 13:00
+    # 楽天ランキングは総合的に反応の良い夜間帯(19〜22時)を厚めに設定
+    - cron: "0 3 * * *"
     - cron: "0 10 * * *"
+    - cron: "0 12 * * *"
+    - cron: "0 13 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -31,6 +33,7 @@ jobs:
           RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
           RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
           RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
+          RAKUTEN_GENRE_ID: ${{ secrets.RAKUTEN_GENRE_ID }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
         run: python scripts/post_to_threads.py
