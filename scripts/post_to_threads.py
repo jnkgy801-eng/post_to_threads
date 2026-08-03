@@ -113,6 +113,9 @@ def post_to_threads(text: str) -> None:
         "access_token": access_token,
     }
     create_resp = requests.post(create_url, data=create_params, timeout=30)
+    if create_resp.status_code >= 400:
+        print(f"Threadsコンテナ作成エラー: {create_resp.status_code}", file=sys.stderr)
+        print(create_resp.text, file=sys.stderr)
     create_resp.raise_for_status()
     creation_id = create_resp.json()["id"]
 
@@ -126,6 +129,9 @@ def post_to_threads(text: str) -> None:
         "access_token": access_token,
     }
     publish_resp = requests.post(publish_url, data=publish_params, timeout=30)
+    if publish_resp.status_code >= 400:
+        print(f"Threads公開エラー: {publish_resp.status_code}", file=sys.stderr)
+        print(publish_resp.text, file=sys.stderr)
     publish_resp.raise_for_status()
 
 
