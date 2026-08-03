@@ -6,13 +6,20 @@
 
 必要な環境変数:
   RAKUTEN_APP_ID        楽天ウェブサービスのApplication ID
+  RAKUTEN_ACCESS_KEY    楽天ウェブサービスのアクセスキー
   RAKUTEN_AFFILIATE_ID  楽天アフィリエイトID
   THREADS_ACCESS_TOKEN  Threads APIの長期アクセストークン
   THREADS_USER_ID       ThreadsのユーザーID(数値)
+
+任意の環境変数:
+  RAKUTEN_GENRE_ID      ランキングを取得するジャンルID(未指定 or 0で総合ランキング)
+                        ジャンルIDは楽天ジャンル検索APIや以下を参照:
+                        https://webservice.rakuten.co.jp/documentation/genre-search
 """
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -48,12 +55,13 @@ def fetch_ranking_items() -> list:
     app_id = os.environ["RAKUTEN_APP_ID"]
     access_key = os.environ["RAKUTEN_ACCESS_KEY"]
     affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")
+    genre_id = os.environ.get("RAKUTEN_GENRE_ID", "0")
 
     params = {
         "applicationId": app_id,
         "accessKey": access_key,
         "affiliateId": affiliate_id,
-        "genreId": 0,
+        "genreId": genre_id,
         "format": "json",
         "page": 1,
     }
@@ -85,18 +93,69 @@ def fetch_ranking_items() -> list:
     return items
 
 
+# ハッシュタグ抽出時に除外する一般的すぎる単語
+STOPWORDS = {
+    "送料無料", "訳あり", "セット", "限定", "公式", "正規品", "新品",
+    "楽天", "楽天市場", "ポイント", "PR", "特典", "対象", "数量限定",
+    "即納", "在庫限り", "入り", "まとめ買い",
+}
+
+
+def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
+    """商品名から簡易的にハッシュタグ候補を抽出する。"""
+    # 括弧とその中身を除去(【限定特典】などの宣伝文言を除外するため)
+    cleaned = re.sub(r"[【\[（(『][^】\]）)』]*[】\]）)』]", " ", item_name)
+    # 残った記号・感嘆符などを除去
+    cleaned = re.sub(r"[!！?？\"']", " ", cleaned)
+    # 区切り文字で分割
+    tokens = re.split(r"[ 　/・,、,\-_]+", cleaned)
+
+    tags = []
+    seen = set()
+    for token in tokens:
+        token = token.strip()
+        if len(token) < 2 or len(token) > 12:
+            continue
+        if token in STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tags.append(f"#{token}")
+        if len(tags) >= max_tags:
+            break
+
+    return tags
+
+
 def build_post_text(item: dict) -> str:
     name = item["itemName"]
-    if len(name) > 60:
-        name = name[:57] + "..."
+    if len(name) > 50:
+        name = name[:47] + "..."
+
+    rank = item["rank"]
+
+    # 順位に応じてフックを変える
+    if rank <= 3:
+        hook = f"🔥 今、楽天で売れまくってる第{rank}位はコレ！"
+    elif rank <= 10:
+        hook = f"👀 楽天ランキングTOP10入り！第{rank}位で話題のアイテム"
+    else:
+        hook = f"✨ 楽天ランキング第{rank}位で密かに人気"
+
+    hashtags = extract_hashtags(item["itemName"])
+    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
     text = (
-        f"【楽天ランキング {item['rank']}位】\n"
-        f"{name}\n"
-        f"価格: {int(item['itemPrice']):,}円\n"
-        f"店舗: {item['shopName']}\n\n"
+        f"{hook}\n\n"
+        f"📦 {name}\n"
+        f"💰 {int(item['itemPrice']):,}円\n"
+        f"🏪 {item['shopName']}\n\n"
+        f"気になった人はチェックしてみて👇\n"
         f"{item['itemUrl']}\n\n"
-        f"#楽天 #楽天ランキング #PR"
+        f"{hashtag_line}"
     )
     return text
 
