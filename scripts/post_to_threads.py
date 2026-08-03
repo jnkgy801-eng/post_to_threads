@@ -55,7 +55,7 @@ def fetch_ranking_items() -> list:
     app_id = os.environ["RAKUTEN_APP_ID"]
     access_key = os.environ["RAKUTEN_ACCESS_KEY"]
     affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")
-    genre_id = os.environ.get("RAKUTEN_GENRE_ID", "0")
+    genre_id = os.environ.get("RAKUTEN_GENRE_ID", "0") or "0"
 
     params = {
         "applicationId": app_id,
