@@ -19,7 +19,8 @@ from pathlib import Path
 
 import requests
 
-RAKUTEN_RANKING_URL = "https://app.rakuten.co.jp/services/api/IchibaItem/Ranking/20220601"
+# 2026年の楽天API移行対応: 新エンドポイント(openapi.rakuten.co.jp)+ accessKey必須
+RAKUTEN_RANKING_URL = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601"
 THREADS_API_BASE = "https://graph.threads.net/v1.0"
 
 POSTED_FILE = Path(__file__).resolve().parent.parent / "data" / "posted.json"
@@ -45,17 +46,23 @@ def save_posted_ids(posted_ids: set) -> None:
 
 def fetch_ranking_items() -> list:
     app_id = os.environ["RAKUTEN_APP_ID"]
+    access_key = os.environ["RAKUTEN_ACCESS_KEY"]
     affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")
 
     params = {
         "applicationId": app_id,
+        "accessKey": access_key,
         "affiliateId": affiliate_id,
         "genreId": 0,
         "format": "json",
         "page": 1,
     }
 
-    resp = requests.get(RAKUTEN_RANKING_URL, params=params, timeout=30)
+    headers = {
+        "Referer": "https://www.rakuten.co.jp/",
+    }
+
+    resp = requests.get(RAKUTEN_RANKING_URL, params=params, headers=headers, timeout=30)
     if resp.status_code != 200:
         print(f"楽天APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
         print(resp.text, file=sys.stderr)
