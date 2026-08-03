@@ -1,0 +1,2 @@
+# post_to_threads
+threadsに楽天アフィリエイトの投稿を行う
