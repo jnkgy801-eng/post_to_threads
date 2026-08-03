@@ -76,7 +76,7 @@ def fetch_ranking_items() -> list:
             {
                 "itemCode": item["itemCode"],
                 "itemName": item["itemName"],
-                "itemPrice": item["itemPrice"],
+                "itemPrice": int(item["itemPrice"]),
                 "itemUrl": item["affiliateUrl"] or item["itemUrl"],
                 "shopName": item["shopName"],
                 "rank": item.get("rank"),
@@ -93,7 +93,7 @@ def build_post_text(item: dict) -> str:
     text = (
         f"【楽天ランキング {item['rank']}位】\n"
         f"{name}\n"
-        f"価格: {item['itemPrice']:,}円\n"
+        f"価格: {int(item['itemPrice']):,}円\n"
         f"店舗: {item['shopName']}\n\n"
         f"{item['itemUrl']}\n\n"
         f"#楽天 #楽天ランキング #PR"
