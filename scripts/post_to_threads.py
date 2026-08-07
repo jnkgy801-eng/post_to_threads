@@ -160,6 +160,30 @@ def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
     return tags
 
 
+def extract_deal_reason(raw_item_name: str) -> str:
+    """元の商品名から「お得な理由」を抽出する。見つからなければ汎用フレーズを返す。"""
+    reasons = []
+
+    m = re.search(r"ポイント\s*最大?\s*(\d+(?:\.\d+)?)倍", raw_item_name)
+    if m:
+        reasons.append(f"ポイント最大{m.group(1)}倍還元中")
+
+    if re.search(r"送料無料", raw_item_name):
+        reasons.append("送料無料")
+
+    if re.search(r"タイムセール|期間限定|数量限定", raw_item_name):
+        reasons.append("期間・数量限定価格")
+
+    m2 = re.search(r"(\d+)\s*(?:%|％)\s*(?:OFF|オフ|off)", raw_item_name)
+    if m2:
+        reasons.append(f"{m2.group(1)}%OFF")
+
+    if reasons:
+        return "・".join(reasons)
+
+    return "このクオリティでこの価格はかなりお得"
+
+
 def build_post_text(item: dict) -> str:
     name = clean_item_name(item["itemName"])
     if len(name) > 50:
@@ -168,44 +192,47 @@ def build_post_text(item: dict) -> str:
     price = f"{int(item['itemPrice']):,}円"
     shop = item["shopName"]
     url = item["itemUrl"]
+    deal_reason = extract_deal_reason(item["itemName"])
 
     hashtags = extract_hashtags(item["itemName"])
     hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
-    # 楽天ランキング1位を紹介する投稿文のバリエーション
-    # (他社のアフィリエイト投稿でよく使われる「フック→商品→価格→根拠→CTA」の型を参考に構成)
+    # 「お得な理由」を軸にした投稿文のバリエーション(順位への言及はしない)
     templates = [
         (
-            f"🏆 楽天ランキング堂々の1位はコレでした\n\n"
+            f"🛍️ これはお得！と思わず紹介したくなった商品\n\n"
             f"📦 {name}\n"
             f"💰 {price}(税込)\n"
             f"🏪 {shop}\n\n"
-            f"みんなが選んだ理由、気になりませんか？👇\n"
+            f"✅ お得ポイント: {deal_reason}\n\n"
+            f"気になった人はチェックしてみて👇\n"
             f"{url}\n\n"
             f"{hashtag_line}"
         ),
         (
-            f"【楽天1位】これ、本当に売れてます😳\n\n"
+            f"😳 この価格、見過ごせない…\n\n"
             f"{name}\n\n"
             f"💰 {price}\n"
             f"🏪 {shop}\n\n"
+            f"🎯 {deal_reason}\n\n"
             f"詳細はこちらから確認できます👇\n"
             f"{url}\n\n"
             f"{hashtag_line}"
         ),
         (
-            f"今このジャンルで一番売れてるのがこちら🔥\n\n"
+            f"🔥 今が買い時かもしれません\n\n"
             f"📦 {name}\n"
             f"💰 {price}\n\n"
-            f"楽天ランキング1位を獲得した理由、\n"
-            f"チェックしてみてください👇\n"
+            f"お得な理由 → {deal_reason}\n\n"
+            f"詳しくはこちらをチェック👇\n"
             f"{url}\n\n"
             f"{hashtag_line}"
         ),
         (
-            f"⭐ 楽天ランキング1位のご紹介\n\n"
+            f"👀 気になっていた人はこのタイミングをお見逃しなく\n\n"
             f"{name}\n"
             f"{price} / {shop}\n\n"
+            f"✅ {deal_reason}\n\n"
             f"気になる方はリンクからどうぞ👇\n"
             f"{url}\n\n"
             f"{hashtag_line}"
@@ -258,10 +285,17 @@ def main() -> int:
         print(f"楽天APIの取得に失敗しました: {e}", file=sys.stderr)
         return 1
 
-    candidates = [i for i in items if i["itemCode"] not in posted_ids and i.get("rank") == 1]
+    # 1位から順に、まだ投稿していない商品を探す(1位が投稿済みなら2位、それも投稿済みなら3位…)
+    ranked = {i["rank"]: i for i in items if i.get("rank") in (1, 2, 3)}
+    candidates = []
+    for r in (1, 2, 3):
+        item = ranked.get(r)
+        if item and item["itemCode"] not in posted_ids:
+            candidates.append(item)
+            break
 
     if not candidates:
-        print("楽天ランキング1位の商品は既に投稿済みです(順位変動待ち)。")
+        print("楽天ランキング1〜3位はすべて投稿済みです(順位変動待ち)。")
         return 0
 
     posted_count = 0
