@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-楽天market総合ランキングAPIから商品を取得し、
-未投稿のものをThreadsに自動投稿するスクリプト。
+楽天市場総合ランキングAPIから「1位の商品」を取得し、
+未投稿であればThreadsに自動投稿するスクリプト。
 
 必要な環境変数:
   RAKUTEN_APP_ID        楽天ウェブサービスのApplication ID
@@ -19,6 +19,7 @@
 
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -97,16 +98,40 @@ def fetch_ranking_items() -> list:
 STOPWORDS = {
     "送料無料", "訳あり", "セット", "限定", "公式", "正規品", "新品",
     "楽天", "楽天市場", "ポイント", "PR", "特典", "対象", "数量限定",
-    "即納", "在庫限り", "入り", "まとめ買い",
+    "即納", "在庫限り", "入り", "まとめ買い", "人気", "サンプルキット",
+    "お買い物マラソン", "最大", "倍",
 }
+
+
+def clean_item_name(item_name: str) -> str:
+    """表示・タグ抽出用に、商品名から販促文言(括弧内)や記号を除去する。"""
+    # 括弧とその中身を除去(【楽天限定】【公式】など販促文言)
+    cleaned = re.sub(r"[【\[（(『][^】\]）)』]*[】\]）)』]", " ", item_name)
+    # ポイント倍率表記(例: ポイント最大19倍)を除去
+    cleaned = re.sub(r"ポイント\s*最大?\s*\d+(?:\.\d+)?倍", " ", cleaned)
+    # 日付・期間表記(例: 8/4 20:00~ 8/11 01:59)を除去
+    cleaned = re.sub(r"\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}\s*[~〜]\s*\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}", " ", cleaned)
+    cleaned = re.sub(r"\d{1,2}/\d{1,2}", " ", cleaned)
+    cleaned = re.sub(r"\d{1,2}:\d{2}", " ", cleaned)
+    # 感嘆符・星などの記号を除去
+    cleaned = re.sub(r"[!！?？\"'★☆~〜]", " ", cleaned)
+    # 入れ子の括弧などで残った孤立記号を除去
+    cleaned = re.sub(r"[【】\[\]（）()『』]", " ", cleaned)
+    # 余分な空白を1つにまとめる
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # 販促目的のSTOPWORDS(複合語含む)を除去
+    for word in STOPWORDS:
+        cleaned = cleaned.replace(word, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if cleaned else item_name
 
 
 def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
     """商品名から簡易的にハッシュタグ候補を抽出する。"""
-    # 括弧とその中身を除去(【限定特典】などの宣伝文言を除外するため)
-    cleaned = re.sub(r"[【\[（(『][^】\]）)』]*[】\]）)』]", " ", item_name)
-    # 残った記号・感嘆符などを除去
-    cleaned = re.sub(r"[!！?？\"']", " ", cleaned)
+    cleaned = clean_item_name(item_name)
+    # STOPWORDSは複合語の一部としても除去する
+    for word in STOPWORDS:
+        cleaned = cleaned.replace(word, " ")
     # 区切り文字で分割
     tokens = re.split(r"[ 　/・,、,\-_]+", cleaned)
 
@@ -120,6 +145,11 @@ def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
             continue
         if token.isdigit():
             continue
+        # 日付・時刻・記号混じりの断片を除外(例: "20:00~", "01:59★", "8/4")
+        if re.search(r"[:：~〜/★☆%％]", token):
+            continue
+        if re.fullmatch(r"[0-9]+[日時分月]?", token):
+            continue
         if token in seen:
             continue
         seen.add(token)
@@ -131,33 +161,58 @@ def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
 
 
 def build_post_text(item: dict) -> str:
-    name = item["itemName"]
+    name = clean_item_name(item["itemName"])
     if len(name) > 50:
         name = name[:47] + "..."
 
-    rank = item["rank"]
-
-    # 順位に応じてフックを変える
-    if rank <= 3:
-        hook = f"🔥 今、楽天で売れまくってる第{rank}位はコレ！"
-    elif rank <= 10:
-        hook = f"👀 楽天ランキングTOP10入り！第{rank}位で話題のアイテム"
-    else:
-        hook = f"✨ 楽天ランキング第{rank}位で密かに人気"
+    price = f"{int(item['itemPrice']):,}円"
+    shop = item["shopName"]
+    url = item["itemUrl"]
 
     hashtags = extract_hashtags(item["itemName"])
     hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
-    text = (
-        f"{hook}\n\n"
-        f"📦 {name}\n"
-        f"💰 {int(item['itemPrice']):,}円\n"
-        f"🏪 {item['shopName']}\n\n"
-        f"気になった人はチェックしてみて👇\n"
-        f"{item['itemUrl']}\n\n"
-        f"{hashtag_line}"
-    )
-    return text
+    # 楽天ランキング1位を紹介する投稿文のバリエーション
+    # (他社のアフィリエイト投稿でよく使われる「フック→商品→価格→根拠→CTA」の型を参考に構成)
+    templates = [
+        (
+            f"🏆 楽天ランキング堂々の1位はコレでした\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}(税込)\n"
+            f"🏪 {shop}\n\n"
+            f"みんなが選んだ理由、気になりませんか？👇\n"
+            f"{url}\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"【楽天1位】これ、本当に売れてます😳\n\n"
+            f"{name}\n\n"
+            f"💰 {price}\n"
+            f"🏪 {shop}\n\n"
+            f"詳細はこちらから確認できます👇\n"
+            f"{url}\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"今このジャンルで一番売れてるのがこちら🔥\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n\n"
+            f"楽天ランキング1位を獲得した理由、\n"
+            f"チェックしてみてください👇\n"
+            f"{url}\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"⭐ 楽天ランキング1位のご紹介\n\n"
+            f"{name}\n"
+            f"{price} / {shop}\n\n"
+            f"気になる方はリンクからどうぞ👇\n"
+            f"{url}\n\n"
+            f"{hashtag_line}"
+        ),
+    ]
+
+    return random.choice(templates)
 
 
 def post_to_threads(text: str) -> None:
@@ -203,10 +258,10 @@ def main() -> int:
         print(f"楽天APIの取得に失敗しました: {e}", file=sys.stderr)
         return 1
 
-    candidates = [i for i in items if i["itemCode"] not in posted_ids]
+    candidates = [i for i in items if i["itemCode"] not in posted_ids and i.get("rank") == 1]
 
     if not candidates:
-        print("投稿可能な新しい商品がありません(全て投稿済み)。")
+        print("楽天ランキング1位の商品は既に投稿済みです(順位変動待ち)。")
         return 0
 
     posted_count = 0
