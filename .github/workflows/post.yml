@@ -2,13 +2,19 @@ name: Rakuten to Threads Auto Post
 
 on:
   schedule:
-    # JST 12:00 / 19:00 / 21:00 / 22:00 = UTC 3:00 / 10:00 / 12:00 / 13:00
-    # 楽天ランキングは総合的に反応の良い夜間帯(19〜22時)を厚めに設定
-    - cron: "0 3 * * *"
-    - cron: "0 10 * * *"
-    - cron: "0 12 * * *"
-    - cron: "0 13 * * *"
-  workflow_dispatch: {}
+    # JST 12:07 / 19:21 / 21:38 / 22:12 = UTC 3:07 / 10:21 / 12:38 / 13:12
+    # cronの起動自体をきっちり0分にしないことに加え、スクリプト内でも
+    # ランダムなジッターを入れて実際の投稿時刻をさらにずらしている
+    - cron: "7 3 * * *"
+    - cron: "21 10 * * *"
+    - cron: "38 12 * * *"
+    - cron: "12 13 * * *"
+  workflow_dispatch:
+    inputs:
+      jitter_max_seconds:
+        description: "手動実行時のジッター最大秒数(即実行したい場合は0)"
+        required: false
+        default: "0"
 
 permissions:
   contents: write
@@ -16,6 +22,8 @@ permissions:
 jobs:
   post:
     runs-on: ubuntu-latest
+    # ジッター(最大15分)を含めても余裕を持てるようタイムアウトを設定
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,6 +44,9 @@ jobs:
           RAKUTEN_GENRE_ID: ${{ secrets.RAKUTEN_GENRE_ID || '0' }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          # スケジュール実行は最大900秒(15分)ゆらす。手動実行(workflow_dispatch)は
+          # 入力値を使う(デフォルト0=即実行)。
+          JITTER_MAX_SECONDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.jitter_max_seconds || '900' }}
         run: python scripts/post_to_threads.py
 
       - name: Commit posted items log
