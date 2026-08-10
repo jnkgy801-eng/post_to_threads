@@ -359,17 +359,16 @@ def main() -> int:
         print(f"楽天APIの取得に失敗しました: {e}", file=sys.stderr)
         return 1
 
-    # 1位から順に、まだ投稿していない商品を探す(1位が投稿済みなら2位、それも投稿済みなら3位…)
-    ranked = {i["rank"]: i for i in items if i.get("rank") in (1, 2, 3)}
+    # 1位から順に(取得した RANKING_FETCH_COUNT 件まで)、まだ投稿していない商品を探す
+    sorted_items = sorted(items, key=lambda i: i.get("rank") or float("inf"))
     candidates = []
-    for r in (1, 2, 3):
-        item = ranked.get(r)
-        if item and item["itemCode"] not in posted_ids:
+    for item in sorted_items:
+        if item["itemCode"] not in posted_ids:
             candidates.append(item)
             break
 
     if not candidates:
-        print("楽天ランキング1〜3位はすべて投稿済みです(順位変動待ち)。")
+        print(f"楽天ランキング1〜{RANKING_FETCH_COUNT}位はすべて投稿済みです(順位変動待ち)。")
         return 0
 
     posted_count = 0
