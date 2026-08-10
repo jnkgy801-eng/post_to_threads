@@ -4,6 +4,14 @@
 楽天市場総合ランキングAPIから「1位の商品」を取得し、
 未投稿であればThreadsに自動投稿するスクリプト。
 
+【アルゴリズム対策版】
+  - 本文にはリンクを含めず、投稿後にリプライとしてリンクを投稿する
+    (外部リンクを含む投稿はリーチが抑制されやすいため)
+  - 本文末尾に会話を誘発する一言(バリエーション)を追加
+    (コメント・会話の発生はアルゴリズムへの強いポジティブシグナルのため)
+  - 投稿実行タイミングにランダムなジッター(ゆらぎ)を入れる
+    (cron通りの完全に規則的な投稿はスパム的行動とみなされやすいため)
+
 必要な環境変数:
   RAKUTEN_APP_ID        楽天ウェブサービスのApplication ID
   RAKUTEN_ACCESS_KEY    楽天ウェブサービスのアクセスキー
@@ -12,9 +20,11 @@
   THREADS_USER_ID       ThreadsのユーザーID(数値)
 
 任意の環境変数:
-  RAKUTEN_GENRE_ID      ランキングを取得するジャンルID(未指定 or 0で総合ランキング)
-                        ジャンルIDは楽天ジャンル検索APIや以下を参照:
-                        https://webservice.rakuten.co.jp/documentation/genre-search
+  RAKUTEN_GENRE_ID       ランキングを取得するジャンルID(未指定 or 0で総合ランキング)
+                         ジャンルIDは楽天ジャンル検索APIや以下を参照:
+                         https://webservice.rakuten.co.jp/documentation/genre-search
+  JITTER_MAX_SECONDS     投稿実行前に待機する最大秒数(既定: 900 = 15分)。
+                         0にするとジッターなし(即実行)。
 """
 
 import json
@@ -37,6 +47,9 @@ POSTED_FILE = Path(__file__).resolve().parent.parent / "data" / "posted.json"
 POSTS_PER_RUN = 1
 # ランキング何位まで候補として取得するか
 RANKING_FETCH_COUNT = 30
+# 投稿実行前に待機する最大秒数(ジッター)。GitHub Actionsのcronは分単位で固定のため、
+# 実際の投稿タイミングをここでランダムにずらし、機械的な規則性を弱める。
+DEFAULT_JITTER_MAX_SECONDS = 900
 
 
 def load_posted_ids() -> set:
@@ -50,6 +63,16 @@ def save_posted_ids(posted_ids: set) -> None:
     POSTED_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(posted_ids), f, ensure_ascii=False, indent=2)
+
+
+def apply_startup_jitter() -> None:
+    """cron起動直後の完全に規則的な投稿を避けるため、ランダムに待機する。"""
+    max_seconds = int(os.environ.get("JITTER_MAX_SECONDS", DEFAULT_JITTER_MAX_SECONDS))
+    if max_seconds <= 0:
+        return
+    wait_seconds = random.randint(0, max_seconds)
+    print(f"ジッター待機: {wait_seconds}秒 (最大{max_seconds}秒)")
+    time.sleep(wait_seconds)
 
 
 def fetch_ranking_items() -> list:
@@ -184,7 +207,21 @@ def extract_deal_reason(raw_item_name: str) -> str:
     return "このクオリティでこの価格はかなりお得"
 
 
-def build_post_text(item: dict) -> str:
+# 本文末尾に添える、会話・コメントを誘発するための一言(ランダムに選択)
+ENGAGEMENT_HOOKS = [
+    "みんなはこういうの買う派？それとも様子見派？",
+    "似たようなの持ってる人いたら感想教えてほしい👀",
+    "これ気になってるんだけど、使ったことある人いますか？",
+    "買うか迷い中…背中押してくれる人いる？",
+    "こういう商品、正直どう思う？率直な意見ください",
+]
+
+
+def build_post_text(item: dict) -> tuple:
+    """
+    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
+    リンクは1通目の本文ではなく、リプライとして投稿する。
+    """
     name = clean_item_name(item["itemName"])
     if len(name) > 50:
         name = name[:47] + "..."
@@ -193,11 +230,12 @@ def build_post_text(item: dict) -> str:
     shop = item["shopName"]
     url = item["itemUrl"]
     deal_reason = extract_deal_reason(item["itemName"])
+    hook = random.choice(ENGAGEMENT_HOOKS)
 
     hashtags = extract_hashtags(item["itemName"])
     hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
-    # 「お得な理由」を軸にした投稿文のバリエーション(順位への言及はしない)
+    # 「お得な理由」を軸にした投稿文のバリエーション(順位への言及はしない、リンクなし)
     templates = [
         (
             f"🛍️ これはお得！と思わず紹介したくなった商品\n\n"
@@ -205,8 +243,7 @@ def build_post_text(item: dict) -> str:
             f"💰 {price}(税込)\n"
             f"🏪 {shop}\n\n"
             f"✅ お得ポイント: {deal_reason}\n\n"
-            f"気になった人はチェックしてみて👇\n"
-            f"{url}\n\n"
+            f"{hook}\n\n"
             f"{hashtag_line}"
         ),
         (
@@ -215,8 +252,7 @@ def build_post_text(item: dict) -> str:
             f"💰 {price}\n"
             f"🏪 {shop}\n\n"
             f"🎯 {deal_reason}\n\n"
-            f"詳細はこちらから確認できます👇\n"
-            f"{url}\n\n"
+            f"{hook}\n\n"
             f"{hashtag_line}"
         ),
         (
@@ -224,8 +260,7 @@ def build_post_text(item: dict) -> str:
             f"📦 {name}\n"
             f"💰 {price}\n\n"
             f"お得な理由 → {deal_reason}\n\n"
-            f"詳しくはこちらをチェック👇\n"
-            f"{url}\n\n"
+            f"{hook}\n\n"
             f"{hashtag_line}"
         ),
         (
@@ -233,37 +268,55 @@ def build_post_text(item: dict) -> str:
             f"{name}\n"
             f"{price} / {shop}\n\n"
             f"✅ {deal_reason}\n\n"
-            f"気になる方はリンクからどうぞ👇\n"
-            f"{url}\n\n"
+            f"{hook}\n\n"
             f"{hashtag_line}"
         ),
     ]
 
-    return random.choice(templates)
+    main_text = random.choice(templates)
+
+    # リプライ本文(リンクはここに集約する)
+    reply_templates = [
+        f"詳細・購入はこちら👇\n{url}",
+        f"商品ページはこちら👇\n{url}",
+        f"気になった方はこちらからチェックできます👇\n{url}",
+    ]
+    reply_text = random.choice(reply_templates)
+
+    return main_text, reply_text
 
 
-def post_to_threads(text: str) -> None:
+def create_thread_container(text: str, reply_to_id: str = None) -> str:
+    """Threadsのメディアコンテナを作成し、creation_idを返す。"""
     access_token = os.environ["THREADS_ACCESS_TOKEN"]
     user_id = os.environ["THREADS_USER_ID"]
 
-    # 1. メディアコンテナ作成
     create_url = f"{THREADS_API_BASE}/{user_id}/threads"
     create_params = {
         "media_type": "TEXT",
         "text": text,
         "access_token": access_token,
     }
+    if reply_to_id:
+        # reply_to_idを指定すると、指定した投稿へのリプライとして作成される
+        create_params["reply_to_id"] = reply_to_id
+
     create_resp = requests.post(create_url, data=create_params, timeout=30)
     if create_resp.status_code >= 400:
         print(f"Threadsコンテナ作成エラー: {create_resp.status_code}", file=sys.stderr)
         print(create_resp.text, file=sys.stderr)
     create_resp.raise_for_status()
-    creation_id = create_resp.json()["id"]
+    return create_resp.json()["id"]
+
+
+def publish_thread_container(creation_id: str) -> str:
+    """作成済みのコンテナを公開し、公開された投稿のidを返す。"""
+    access_token = os.environ["THREADS_ACCESS_TOKEN"]
+    user_id = os.environ["THREADS_USER_ID"]
 
     # Threads APIの仕様上、公開前に少し待つことが推奨されている
     time.sleep(5)
 
-    # 2. 公開
     publish_url = f"{THREADS_API_BASE}/{user_id}/threads_publish"
     publish_params = {
         "creation_id": creation_id,
@@ -274,9 +327,30 @@ def post_to_threads(text: str) -> None:
         print(f"Threads公開エラー: {publish_resp.status_code}", file=sys.stderr)
         print(publish_resp.text, file=sys.stderr)
     publish_resp.raise_for_status()
+    return publish_resp.json()["id"]
+
+
+def post_to_threads(main_text: str, reply_text: str) -> None:
+    """
+    本文(リンクなし)を投稿した後、その投稿へのリプライとしてリンク付き本文を投稿する。
+    """
+    # 1. 本文(リンクなし)を投稿
+    main_creation_id = create_thread_container(main_text)
+    main_post_id = publish_thread_container(main_creation_id)
+    print(f"本文投稿成功: id={main_post_id}")
+
+    # リプライ投稿までも少し間を空ける(連続APIコールを避ける)
+    time.sleep(random.uniform(3, 8))
+
+    # 2. リンク付きリプライを投稿
+    reply_creation_id = create_thread_container(reply_text, reply_to_id=main_post_id)
+    reply_post_id = publish_thread_container(reply_creation_id)
+    print(f"リプライ投稿成功: id={reply_post_id}")
 
 
 def main() -> int:
+    apply_startup_jitter()
+
     posted_ids = load_posted_ids()
 
     try:
@@ -303,9 +377,9 @@ def main() -> int:
         if posted_count >= POSTS_PER_RUN:
             break
 
-        text = build_post_text(item)
+        main_text, reply_text = build_post_text(item)
         try:
-            post_to_threads(text)
+            post_to_threads(main_text, reply_text)
             print(f"投稿成功: {item['itemName']}")
             posted_ids.add(item["itemCode"])
             posted_count += 1
