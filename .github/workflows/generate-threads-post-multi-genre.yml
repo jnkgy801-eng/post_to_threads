@@ -1,0 +1,48 @@
+name: Generate Threads Posts (Rakuten Ranking, Multi-Genre)
+
+# 手動実行のみ。自動投稿は行わず、各ジャンルごとに1位〜5位の
+# 投稿文・アフィリエイトURLを生成してArtifactとして出力するだけの
+# ワークフローです。生成された内容を確認のうえ、手動でThreadsに
+# 投稿してください。
+on:
+  workflow_dispatch:
+    inputs:
+      genre_ids:
+        description: "カンマ区切りの楽天ジャンルIDリスト(空の場合はスクリプト側のデフォルトを使用)"
+        required: false
+        default: ""
+      top_n:
+        description: "各ジャンルで取得する順位の数"
+        required: false
+        default: "5"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依存パッケージをインストール
+        run: pip install requests
+
+      - name: 各ジャンルの投稿文を生成(投稿は行わない)
+        env:
+          RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
+          RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
+          RAKUTEN_GENRE_IDS: ${{ github.event.inputs.genre_ids }}
+          RANKING_TOP_N: ${{ github.event.inputs.top_n }}
+        run: python scripts/generate_threads_post_multi_genre.py
+
+      - name: 生成結果をArtifactとしてアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: threads-posts-${{ github.run_id }}
+          path: scripts/generated_posts/
+          retention-days: 30
