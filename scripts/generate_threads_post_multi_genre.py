@@ -18,7 +18,9 @@ Threads投稿用の本文(リンクなし)とリプライ用テキスト(リン�
   RAKUTEN_GENRE_IDS     カンマ区切りのジャンルIDリスト。
                          未指定の場合は下記 DEFAULT_GENRE_IDS を使用。
                          例: "100939,551167,100227"
-  RANKING_TOP_N         各ジャンルで取得する順位の数(既定: 5)
+  RANKING_TOP_N         各ジャンルで取得する順位の数(既定: 5)。
+                         30を超える値を指定した場合は自動的に複数ページを
+                         取得して連結する(例: 50位まで指定するとpage1,2を取得)。
 """
 
 import json
@@ -47,43 +49,65 @@ DEFAULT_GENRE_IDS = [
 RANKING_TOP_N_DEFAULT = 5
 
 
+# 楽天ランキングAPIは1ページあたり最大30件しか返さない(31位以降は取得できない仕様)。
+# top_n が30を超える場合は、必要なページ数だけ自動でページングして取得する。
+RAKUTEN_ITEMS_PER_PAGE = 30
+
+
 def fetch_ranking_items(genre_id: str, top_n: int) -> list:
     app_id = os.environ["RAKUTEN_APP_ID"]
     access_key = os.environ["RAKUTEN_ACCESS_KEY"]
     affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")
-
-    params = {
-        "applicationId": app_id,
-        "accessKey": access_key,
-        "affiliateId": affiliate_id,
-        "genreId": genre_id,
-        "format": "json",
-        "page": 1,
-    }
     headers = {"Referer": "https://www.rakuten.co.jp/"}
 
-    resp = requests.get(RAKUTEN_RANKING_URL, params=params, headers=headers, timeout=30)
-    if resp.status_code != 200:
-        print(f"[genre={genre_id}] 楽天APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
-        print(resp.text, file=sys.stderr)
-    resp.raise_for_status()
-    data = resp.json()
-
     items = []
-    for entry in data.get("Items", [])[:top_n]:
-        item = entry["Item"]
-        items.append(
-            {
-                "genreId": genre_id,
-                "itemCode": item["itemCode"],
-                "itemName": item["itemName"],
-                "itemPrice": int(item["itemPrice"]),
-                "itemUrl": item["affiliateUrl"] or item["itemUrl"],
-                "shopName": item["shopName"],
-                "rank": item.get("rank"),
-            }
-        )
-    return items
+    total_pages_needed = -(-top_n // RAKUTEN_ITEMS_PER_PAGE)  # 切り上げ除算
+
+    for page in range(1, total_pages_needed + 1):
+        params = {
+            "applicationId": app_id,
+            "accessKey": access_key,
+            "affiliateId": affiliate_id,
+            "genreId": genre_id,
+            "format": "json",
+            "page": page,
+        }
+
+        resp = requests.get(RAKUTEN_RANKING_URL, params=params, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            print(f"[genre={genre_id}, page={page}] 楽天APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
+            print(resp.text, file=sys.stderr)
+        resp.raise_for_status()
+        data = resp.json()
+
+        page_items = data.get("Items", [])
+        if not page_items:
+            # これ以上ページがない場合は打ち切る
+            break
+
+        for entry in page_items:
+            item = entry["Item"]
+            items.append(
+                {
+                    "genreId": genre_id,
+                    "itemCode": item["itemCode"],
+                    "itemName": item["itemName"],
+                    "itemPrice": int(item["itemPrice"]),
+                    "itemUrl": item["affiliateUrl"] or item["itemUrl"],
+                    "shopName": item["shopName"],
+                    "rank": item.get("rank"),
+                }
+            )
+
+        if len(items) >= top_n:
+            break
+
+        # ページ間でも念のため少し間隔を空ける(API負荷軽減)
+        time.sleep(0.5)
+
+    # 順位順に並べて先頭top_n件のみ返す
+    items_sorted = sorted(items, key=lambda i: i.get("rank") or float("inf"))
+    return items_sorted[:top_n]
 
 
 STOPWORDS = {
@@ -165,65 +189,42 @@ ENGAGEMENT_HOOKS = [
 
 
 def build_post_text(item: dict) -> tuple:
-    """投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。"""
+    """
+    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
+
+    構成イメージ(参考にした実例):
+      [本文]
+      商品名(短縮)
+      訴求ポイント(割引・お得情報)！！
+      補足の一言↓
+
+      [リプライ]
+      こちらから↓
+      {URL}
+      #pr
+    """
     name = clean_item_name(item["itemName"])
-    if len(name) > 50:
-        name = name[:47] + "..."
+    if len(name) > 30:
+        name = name[:27] + "..."
 
     price = f"{int(item['itemPrice']):,}円"
-    shop = item["shopName"]
     url = item["itemUrl"]
     deal_reason = extract_deal_reason(item["itemName"])
-    hook = random.choice(ENGAGEMENT_HOOKS)
 
-    hashtags = extract_hashtags(item["itemName"])
-    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
-
-    templates = [
-        (
-            f"🛍️ これはお得！と思わず紹介したくなった商品\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}(税込)\n"
-            f"🏪 {shop}\n\n"
-            f"✅ お得ポイント: {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"😳 この価格、見過ごせない…\n\n"
-            f"{name}\n\n"
-            f"💰 {price}\n"
-            f"🏪 {shop}\n\n"
-            f"🎯 {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"🔥 今が買い時かもしれません\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n\n"
-            f"お得な理由 → {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"👀 気になっていた人はこのタイミングをお見逃しなく\n\n"
-            f"{name}\n"
-            f"{price} / {shop}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
+    # 補足の一言(バリエーション)
+    sub_lines = [
+        "いろいろな種類があるよ↓",
+        "今だけのお得情報あるよ↓",
+        "気になる方はチェックしてみてね↓",
+        "詳しくはこちらから見てみて↓",
+        "この機会にぜひ↓",
     ]
+    sub_line = random.choice(sub_lines)
 
-    main_text = random.choice(templates)
+    main_text = f"{name}\n{deal_reason}！！\n{sub_line}"
 
-    reply_templates = [
-        f"詳細・購入はこちら👇\n{url}",
-        f"商品ページはこちら👇\n{url}",
-        f"気になった方はこちらからチェックできます👇\n{url}",
-    ]
-    reply_text = random.choice(reply_templates)
+    # リプライ本文: 「こちらから↓」+ URL + #pr のシンプルな形
+    reply_text = f"こちらから↓\n{url}\n#pr"
 
     return main_text, reply_text
 
@@ -283,10 +284,9 @@ def main() -> int:
             print(f"[genre={genre_id}] 楽天APIの取得に失敗しました: {e}", file=sys.stderr)
             continue
 
-        items_sorted = sorted(items, key=lambda i: i.get("rank") or float("inf"))
-
+        # fetch_ranking_items内で既に順位順ソート・上位top_n件への絞り込み済み
         genre_items = []
-        for item in items_sorted:
+        for item in items:
             main_text, reply_text = build_post_text(item)
             genre_items.append(
                 {"item": item, "main_text": main_text, "reply_text": reply_text}
