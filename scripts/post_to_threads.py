@@ -11,13 +11,12 @@
   - どちらも未指定の場合は、従来どおりジャンル総合ランキング(RAKUTEN_GENRE_ID)
     から投稿する
 
-【アルゴリズム対策版】
-  - 本文にはリンクを含めず、投稿後にリプライとしてリンクを投稿する
-    (外部リンクを含む投稿はリーチが抑制されやすいため)
-  - 本文末尾に会話を誘発する一言(バリエーション)を追加
-    (コメント・会話の発生はアルゴリズムへの強いポジティブシグナルのため)
-  - 投稿実行タイミングにランダムなジッター(ゆらぎ)を入れる
-    (cron通りの完全に規則的な投稿はスパム的行動とみなされやすいため)
+【AI生成対応版】
+  - GEMINI_API_KEY を設定すると、投稿文(本文)をGoogle Gemini API(無料枠)で
+    毎回自動生成する。未設定、またはAPI呼び出しに失敗した場合は、
+    従来の固定テンプレートによる生成に自動フォールバックする。
+  - ChatGPT(OpenAI API)は継続利用できる無料枠が無い(新規登録時の試用クレジット
+    のみ)ため、本スクリプトでは無料枠のあるGemini APIのみ対応している。
 
 必要な環境変数:
   RAKUTEN_APP_ID        楽天ウェブサービスのApplication ID
@@ -35,6 +34,10 @@
                          RAKUTEN_KEYWORD/RAKUTEN_KEYWORDSが未指定の場合のみ使われる。
                          ジャンルIDは楽天ジャンル検索APIや以下を参照:
                          https://webservice.rakuten.co.jp/documentation/genre-search
+  GEMINI_API_KEY         Google AI StudioのGemini APIキー(無料枠あり)。
+                         設定すると投稿文をAI生成する。
+                         取得方法: https://aistudio.google.com/apikey
+  GEMINI_MODEL           使用するGeminiモデル名(既定: gemini-2.0-flash)。
   JITTER_MAX_SECONDS     投稿実行前に待機する最大秒数(既定: 900 = 15分)。
                          0にするとジッターなし(即実行)。
 """
@@ -407,36 +410,84 @@ def build_feature_bullets(deal_reason: str) -> list:
     return bullets[:2]
 
 
-def build_post_text(item: dict) -> tuple:
+# Threads本文の上限は500文字。AI生成テキスト+ハッシュタグがこれを超えないよう
+# 安全マージンを取って切り詰める。
+THREADS_TEXT_MAX_LENGTH = 480
+
+
+def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: str) -> str:
     """
-    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
-    リンクは1通目の本文ではなく、リプライとして投稿する。
-
-    本文は下記のような短いフォーマットで組み立てる:
-      🧴 商品名✨
-      💰 価格(税込)
-
-      ✅ 特徴1
-      ✅ 特徴2
-
-      締めの一言(ジャンルごとに変化)
-
-      #ハッシュタグ #PR
+    Gemini API(無料枠)を使って投稿文の本文(見出し〜締めの一言まで。
+    ハッシュタグは含まない)を生成する。
+    GEMINI_API_KEY が未設定、またはAPI呼び出しに失敗した場合は
+    空文字列を返す(呼び出し側でテンプレート生成にフォールバックする)。
     """
-    name = clean_item_name(item["itemName"])
-    # 短いフォーマットに合わせて、商品名も簡潔な長さに収める
-    if len(name) > 28:
-        name = name[:26] + "…"
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return ""
 
-    price = f"{int(item['itemPrice']):,}円"
-    url = item["itemUrl"]
-    deal_reason = extract_deal_reason(item["itemName"])
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
+
+    prompt = (
+        "あなたは楽天アフィリエイトの投稿文を作る日本語のコピーライターです。\n"
+        "以下の商品情報をもとに、Threads(旧Twitter Threads)に投稿する短い紹介文を"
+        "1本だけ作ってください。\n\n"
+        "【商品情報】\n"
+        f"商品名: {item['itemName']}\n"
+        f"価格: {price}\n"
+        f"お得ポイント: {deal_reason}\n\n"
+        "【出力フォーマット】(絵文字の位置・改行の入れ方も含め、必ずこの形式に従うこと)\n"
+        f"{style['lead_emoji']} 商品名を20文字程度に要約したもの(末尾に絵文字1つ)\n\n"
+        "💰 価格(税込)\n\n"
+        "✅ 特徴を一言で(1〜2行、各20文字以内)\n\n"
+        "締めの一言(15〜25文字程度、絵文字1つ)\n\n"
+        "【厳守事項】\n"
+        "- 商品URL・リンクは絶対に含めない(このあと別途リプライとして投稿するため)\n"
+        "- 「#PR」などのハッシュタグは絶対に含めない(このあと別途付与するため)\n"
+        "- 医学的な効能・効果を断定する表現や、誇大な表現は使わない\n"
+        "- 未成年に関する表現は使わない\n"
+        "- 出力は投稿文の本文のみとし、前置き・説明・コードブロック記号(```)は一切付けない\n"
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.9,
+            "maxOutputTokens": 300,
+        },
+    }
+
+    try:
+        resp = requests.post(
+            url,
+            params={"key": api_key},
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"Gemini APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
+            print(resp.text, file=sys.stderr)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # ```や```text のようなコードブロック記号が付いて返ってきた場合は除去する
+        text = re.sub(r"^```[a-zA-Z]*\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        return text.strip()
+    except Exception as e:
+        print(f"Gemini API呼び出しに失敗しました(テンプレート生成にフォールバックします): {e}", file=sys.stderr)
+        return ""
+
+
+def build_template_post_text(item: dict, name: str, price: str, deal_reason: str, category: str) -> str:
+    """
+    Gemini APIが使えない場合のフォールバックとして使う、
+    従来通りの固定テンプレートによる本文生成(ハッシュタグは含まない)。
+    """
     bullets = build_feature_bullets(deal_reason)
-
-    hashtags = extract_hashtags(item["itemName"])
-    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
-
-    category = classify_genre_category(item["itemName"])
     style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
     tail_emoji = random.choice(style["tail_emoji"])
     closing = random.choice(style["closing"])
@@ -448,9 +499,52 @@ def build_post_text(item: dict) -> tuple:
     if bullets:
         lines.append("\n".join(f"✅ {b}" for b in bullets))
     lines.append(closing)
-    lines.append(hashtag_line)
 
-    main_text = "\n\n".join(lines)
+    return "\n\n".join(lines)
+
+
+def build_post_text(item: dict) -> tuple:
+    """
+    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
+    リンクは1通目の本文ではなく、リプライとして投稿する。
+
+    本文はまずGemini API(無料枠)での生成を試み、
+    GEMINI_API_KEY未設定またはAPI失敗時は、従来の固定テンプレートに
+    フォールバックする。いずれの場合も最終的な形は下記の通り:
+      🧴 商品名✨
+      💰 価格(税込)
+      ✅ 特徴1
+      ✅ 特徴2
+      締めの一言
+      #ハッシュタグ #PR
+    """
+    name = clean_item_name(item["itemName"])
+    # 短いフォーマットに合わせて、商品名も簡潔な長さに収める
+    if len(name) > 28:
+        name = name[:26] + "…"
+
+    price = f"{int(item['itemPrice']):,}円"
+    url = item["itemUrl"]
+    deal_reason = extract_deal_reason(item["itemName"])
+    category = classify_genre_category(item["itemName"])
+
+    hashtags = extract_hashtags(item["itemName"])
+    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
+
+    body_text = generate_ai_post_text(item, category, price, deal_reason)
+    used_ai = bool(body_text)
+    if not body_text:
+        body_text = build_template_post_text(item, name, price, deal_reason, category)
+
+    main_text = f"{body_text}\n\n{hashtag_line}"
+
+    # Threadsの文字数上限(500文字)を超えないよう安全のため切り詰める
+    if len(main_text) > THREADS_TEXT_MAX_LENGTH:
+        overflow = len(main_text) - THREADS_TEXT_MAX_LENGTH
+        body_text = body_text[: max(0, len(body_text) - overflow - 1)] + "…"
+        main_text = f"{body_text}\n\n{hashtag_line}"
+
+    print(f"本文生成: {'Gemini API' if used_ai else 'テンプレート'}")
 
     # リプライ本文(リンクはここに集約する)
     reply_templates = [
