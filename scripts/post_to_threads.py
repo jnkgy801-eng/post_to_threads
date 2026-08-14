@@ -220,8 +220,12 @@ STOPWORDS = {
 
 def clean_item_name(item_name: str) -> str:
     """表示・タグ抽出用に、商品名から販促文言(括弧内)や記号を除去する。"""
+    cleaned = item_name
+    # 「クーポンで6,980円」のようなクーポン価格表記を除去(価格情報はitemPriceで別途扱う)
+    cleaned = re.sub(r"クーポンで\s*\d{1,3}(?:,\d{3})*\s*円", " ", cleaned)
+    cleaned = re.sub(r"クーポン(?:利用|使用|価格)?", " ", cleaned)
     # 括弧とその中身を除去(【楽天限定】【公式】など販促文言)
-    cleaned = re.sub(r"[【\[（(『][^】\]）)』]*[】\]）)』]", " ", item_name)
+    cleaned = re.sub(r"[【\[（(『][^】\]）)』]*[】\]）)』]", " ", cleaned)
     # ポイント倍率表記(例: ポイント最大19倍)を除去
     cleaned = re.sub(r"ポイント\s*最大?\s*\d+(?:\.\d+)?倍", " ", cleaned)
     # 日付・期間表記(例: 8/4 20:00~ 8/11 01:59)を除去
@@ -238,6 +242,22 @@ def clean_item_name(item_name: str) -> str:
     for word in STOPWORDS:
         cleaned = cleaned.replace(word, " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # 楽天の商品名はSEO目的で同じ単語(例: 「加湿器」)が何度も
+    # 繰り返し出てくることが多いため、空白区切りのトークン単位で
+    # 重複を除去し、短く自然な見た目にする(出現順は維持)。
+    tokens = cleaned.split(" ")
+    deduped = []
+    seen_tokens = set()
+    for token in tokens:
+        if not token:
+            continue
+        if token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        deduped.append(token)
+    cleaned = " ".join(deduped)
+
     return cleaned if cleaned else item_name
 
 
@@ -299,15 +319,6 @@ def extract_deal_reason(raw_item_name: str) -> str:
     return "このクオリティでこの価格はかなりお得"
 
 
-# 本文末尾に添える、会話・コメントを誘発するための一言(ランダムに選択、汎用ジャンル用)
-ENGAGEMENT_HOOKS = [
-    "みんなはこういうの買う派？それとも様子見派？",
-    "似たようなの持ってる人いたら感想教えてほしい👀",
-    "これ気になってるんだけど、使ったことある人いますか？",
-    "買うか迷い中…背中押してくれる人いる？",
-    "こういう商品、正直どう思う？率直な意見ください",
-]
-
 # ジャンル判定用キーワード(商品名からの簡易マッチング)
 # 季節性は「今が買い時」という時間的な訴求力が強いため優先度を最も高くし、
 # 続けて家電・日用品・食品の順で判定する。どれにも当てはまらなければ汎用(default)。
@@ -343,155 +354,103 @@ def classify_genre_category(item_name: str) -> str:
     return "default"
 
 
-# ジャンル別の投稿文テンプレート。
-# 「悩み共感型」「数字訴求型」「季節・タイミング訴求型」など、
-# Threadsで反応が取りやすいとされる型に沿って分けている。
-def _daily_templates(name, price, shop, deal_reason, hashtag_line) -> list:
-    """日用品・消耗品向け: 悩み共感型"""
-    return [
-        (
-            f"😳 {name}ってどれも同じだと思ってたけど、これは別格だった…\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}(税込)\n"
-            f"🏪 {shop}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"使い心地がまるで違って、一度使うと他のに戻れなくなるやつ。\n\n"
-            f"これ使ってる人、他にどんな商品使ってるか気になる🤔\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"🧴 地味だけど、この差は大きいと思う\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"毎日使うものだからこそ、ちょっとの違いが積み重なる気がしてる。\n\n"
-            f"日用品、みんなはどこにこだわってる？\n\n"
-            f"{hashtag_line}"
-        ),
-    ]
+# ジャンルごとの見た目(先頭・末尾の絵文字、締めの一言)。
+# 「🫧 商品名✨ / 💰価格 / ✅特徴 ✅特徴 / 締めの一言 / ハッシュタグ」という
+# 短いフォーマットに使う。
+_CATEGORY_STYLE = {
+    "daily": {
+        "lead_emoji": "🧴",
+        "tail_emoji": ["✨", "💫", "🌿"],
+        "closing": [
+            "使うたびに違いを実感できると評判🌿",
+            "毎日使うものだから、この差は大きい🌿",
+        ],
+    },
+    "appliance": {
+        "lead_emoji": "⚡",
+        "tail_emoji": ["✨", "🔥"],
+        "closing": [
+            "口コミでも高評価の人気アイテム⚡",
+            "時短効果は使ってみるとよく分かる⚡",
+        ],
+    },
+    "seasonal": {
+        "lead_emoji": "🌡️",
+        "tail_emoji": ["☀️", "❄️", "✨"],
+        "closing": [
+            "この季節に手放せなくなると評判🌿",
+            "今のうちに備えておきたい一品🌿",
+        ],
+    },
+    "food": {
+        "lead_emoji": "🍪",
+        "tail_emoji": ["✨", "🌿"],
+        "closing": [
+            "リピーター続出の人気商品🌿",
+            "レビューでも高評価の一品🌿",
+        ],
+    },
+    "default": {
+        "lead_emoji": "🛍️",
+        "tail_emoji": ["✨", "💕"],
+        "closing": [
+            "レビューでも高評価の人気アイテム🌿",
+            "コスパの良さで選ばれている一品✨",
+        ],
+    },
+}
 
 
-def _appliance_templates(name, price, shop, deal_reason, hashtag_line) -> list:
-    """家電・時短グッズ向け: 数字訴求型"""
-    return [
-        (
-            f"⏱️ 毎日の面倒な作業、これで一気に楽になった\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n"
-            f"🏪 {shop}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"最初は半信半疑だったけど、使い出すと手放せなくなるタイプの商品。\n\n"
-            f"同じような時短グッズでおすすめあったら教えてほしい👀\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"🔌 これ知らずに今まで損してた気がする\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"面倒だった工程がまるごと自動化されるタイプで、地味に時間を作ってくれる。\n\n"
-            f"こういうガジェット系、他にも気になってる人いる？\n\n"
-            f"{hashtag_line}"
-        ),
-    ]
-
-
-def _seasonal_templates(name, price, shop, deal_reason, hashtag_line) -> list:
-    """季節性の高い商品向け: 季節・タイミング訴求型"""
-    return [
-        (
-            f"🌡️ そろそろこれ買わないと詰む季節がきた\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n"
-            f"🏪 {shop}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"去年これ知らずに乗り切って後悔した人、今年は先手打とう。\n\n"
-            f"みんなは対策済み？まだの人いる？\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"⏳ 今のうちに準備しておきたいやつ\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"直前になって焦って探すより、今のタイミングで押さえておく方が絶対ラク。\n\n"
-            f"この季節、他に必須だと思うアイテムある？\n\n"
-            f"{hashtag_line}"
-        ),
-    ]
-
-
-def _default_templates(name, price, shop, deal_reason, hashtag_line, hook) -> list:
-    """上記どれにも当てはまらない場合の汎用テンプレート(お得訴求型)"""
-    return [
-        (
-            f"🛍️ これはお得！と思わず紹介したくなった商品\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}(税込)\n"
-            f"🏪 {shop}\n\n"
-            f"✅ お得ポイント: {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"😳 この価格、見過ごせない…\n\n"
-            f"{name}\n\n"
-            f"💰 {price}\n"
-            f"🏪 {shop}\n\n"
-            f"🎯 {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"🔥 今が買い時かもしれません\n\n"
-            f"📦 {name}\n"
-            f"💰 {price}\n\n"
-            f"お得な理由 → {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-        (
-            f"👀 気になっていた人はこのタイミングをお見逃しなく\n\n"
-            f"{name}\n"
-            f"{price} / {shop}\n\n"
-            f"✅ {deal_reason}\n\n"
-            f"{hook}\n\n"
-            f"{hashtag_line}"
-        ),
-    ]
+def build_feature_bullets(deal_reason: str) -> list:
+    """extract_deal_reason()の結果(・区切り)を、最大2つの短いチェック項目に分ける。"""
+    bullets = [part.strip() for part in deal_reason.split("・") if part.strip()]
+    return bullets[:2]
 
 
 def build_post_text(item: dict) -> tuple:
     """
     投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
     リンクは1通目の本文ではなく、リプライとして投稿する。
-    商品名からジャンルを判定し、ジャンルに合った型(悩み共感型/数字訴求型/
-    季節訴求型/汎用お得訴求型)のテンプレートを使う。
+
+    本文は下記のような短いフォーマットで組み立てる:
+      🧴 商品名✨
+      💰 価格(税込)
+
+      ✅ 特徴1
+      ✅ 特徴2
+
+      締めの一言(ジャンルごとに変化)
+
+      #ハッシュタグ #PR
     """
     name = clean_item_name(item["itemName"])
-    if len(name) > 50:
-        name = name[:47] + "..."
+    # 短いフォーマットに合わせて、商品名も簡潔な長さに収める
+    if len(name) > 28:
+        name = name[:26] + "…"
 
     price = f"{int(item['itemPrice']):,}円"
-    shop = item["shopName"]
     url = item["itemUrl"]
     deal_reason = extract_deal_reason(item["itemName"])
-    hook = random.choice(ENGAGEMENT_HOOKS)
+    bullets = build_feature_bullets(deal_reason)
 
     hashtags = extract_hashtags(item["itemName"])
     hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
     category = classify_genre_category(item["itemName"])
-    if category == "daily":
-        templates = _daily_templates(name, price, shop, deal_reason, hashtag_line)
-    elif category == "appliance":
-        templates = _appliance_templates(name, price, shop, deal_reason, hashtag_line)
-    elif category == "seasonal":
-        templates = _seasonal_templates(name, price, shop, deal_reason, hashtag_line)
-    else:
-        templates = _default_templates(name, price, shop, deal_reason, hashtag_line, hook)
+    style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
+    tail_emoji = random.choice(style["tail_emoji"])
+    closing = random.choice(style["closing"])
 
-    main_text = random.choice(templates)
+    lines = [
+        f"{style['lead_emoji']} {name}{tail_emoji}",
+        f"💰 {price}(税込)",
+    ]
+    if bullets:
+        lines.append("\n".join(f"✅ {b}" for b in bullets))
+    lines.append(closing)
+    lines.append(hashtag_line)
+
+    main_text = "\n\n".join(lines)
 
     # リプライ本文(リンクはここに集約する)
     reply_templates = [
