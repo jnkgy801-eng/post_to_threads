@@ -15,6 +15,10 @@ on:
         description: "手動実行時のジッター最大秒数(即実行したい場合は0)"
         required: false
         default: "0"
+      keyword:
+        description: "手動実行時に検索するキーワード(空欄ならRAKUTEN_KEYWORDSからランダム選択、それも空ならジャンルランキング)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -42,6 +46,15 @@ jobs:
           RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
           RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
           RAKUTEN_GENRE_ID: ${{ secrets.RAKUTEN_GENRE_ID || '0' }}
+          # 手動実行(workflow_dispatch)時はinputのkeywordを最優先で使う。
+          # スケジュール実行(自動実行)時はここは空になり、スクリプト側が
+          # RAKUTEN_KEYWORDSの中からランダムに1つを自動選択する。
+          RAKUTEN_KEYWORD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.keyword || '' }}
+          # 自動実行時に選択候補とするキーワード一覧(カンマ区切り)。
+          # 例: "扇風機,加湿器,掃除機,洗剤,モバイルバッテリー"
+          # リポジトリの Settings > Secrets and variables > Actions で設定する。
+          # 未設定(空)の場合は、従来どおりジャンル総合ランキング(RAKUTEN_GENRE_ID)から投稿する。
+          RAKUTEN_KEYWORDS: ${{ secrets.RAKUTEN_KEYWORDS }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           # スケジュール実行は最大900秒(15分)ゆらす。手動実行(workflow_dispatch)は
