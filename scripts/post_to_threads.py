@@ -37,7 +37,11 @@
   GEMINI_API_KEY         Google AI StudioのGemini APIキー(無料枠あり)。
                          設定すると投稿文をAI生成する。
                          取得方法: https://aistudio.google.com/apikey
-  GEMINI_MODEL           使用するGeminiモデル名(既定: gemini-2.0-flash)。
+  GEMINI_MODEL           使用するGeminiモデル名(既定: gemini-3.5-flash-lite)。
+                         Googleの都合でモデル名は今後も変わり得るので、
+                         「404 model not found」エラーが出た場合は
+                         https://ai.google.dev/gemini-api/docs/models で
+                         現在利用可能なモデル名を確認して変更すること。
   JITTER_MAX_SECONDS     投稿実行前に待機する最大秒数(既定: 900 = 15分)。
                          0にするとジッターなし(即実行)。
 """
@@ -426,7 +430,7 @@ def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: st
     if not api_key:
         return ""
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash"
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
