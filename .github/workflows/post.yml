@@ -55,6 +55,9 @@ jobs:
           # リポジトリの Settings > Secrets and variables > Actions で設定する。
           # 未設定(空)の場合は、従来どおりジャンル総合ランキング(RAKUTEN_GENRE_ID)から投稿する。
           RAKUTEN_KEYWORDS: ${{ secrets.RAKUTEN_KEYWORDS }}
+          # Google AI Studioで発行した無料枠のGemini APIキー。
+          # 未設定の場合は自動的に固定テンプレートでの投稿文生成にフォールバックする。
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
           # スケジュール実行は最大900秒(15分)ゆらす。手動実行(workflow_dispatch)は
