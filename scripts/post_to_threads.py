@@ -207,7 +207,7 @@ def extract_deal_reason(raw_item_name: str) -> str:
     return "このクオリティでこの価格はかなりお得"
 
 
-# 本文末尾に添える、会話・コメントを誘発するための一言(ランダムに選択)
+# 本文末尾に添える、会話・コメントを誘発するための一言(ランダムに選択、汎用ジャンル用)
 ENGAGEMENT_HOOKS = [
     "みんなはこういうの買う派？それとも様子見派？",
     "似たようなの持ってる人いたら感想教えてほしい👀",
@@ -216,27 +216,122 @@ ENGAGEMENT_HOOKS = [
     "こういう商品、正直どう思う？率直な意見ください",
 ]
 
+# ジャンル判定用キーワード(商品名からの簡易マッチング)
+# 季節性は「今が買い時」という時間的な訴求力が強いため優先度を最も高くし、
+# 続けて家電・日用品・食品の順で判定する。どれにも当てはまらなければ汎用(default)。
+_GENRE_KEYWORDS = {
+    "seasonal": [
+        "冷感", "虫除け", "虫よけ", "扇風機", "日焼け", "UV", "紫外線",
+        "クーラー", "冷却", "熱中症", "加湿器", "ヒーター", "防寒", "カイロ",
+        "こたつ", "扇子", "日傘",
+    ],
+    "appliance": [
+        "家電", "掃除機", "ドライヤー", "空気清浄機", "充電器", "スピーカー",
+        "イヤホン", "コードレス", "電動", "自動", "タイマー", "USB", "モバイルバッテリー",
+        "調理器", "クッカー", "炊飯器", "電気",
+    ],
+    "daily": [
+        "洗剤", "ティッシュ", "キッチン", "掃除", "クリーナー", "スポンジ",
+        "ゴミ袋", "日用品", "消耗品", "トイレット", "ラップ", "洗濯", "柔軟剤",
+        "マスク", "除菌", "消臭",
+    ],
+    "food": [
+        "お菓子", "スイーツ", "コーヒー", "紅茶", "グルメ", "スナック",
+        "ドリンク", "食品", "米", "肉", "魚", "野菜", "調味料",
+    ],
+}
 
-def build_post_text(item: dict) -> tuple:
-    """
-    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
-    リンクは1通目の本文ではなく、リプライとして投稿する。
-    """
-    name = clean_item_name(item["itemName"])
-    if len(name) > 50:
-        name = name[:47] + "..."
 
-    price = f"{int(item['itemPrice']):,}円"
-    shop = item["shopName"]
-    url = item["itemUrl"]
-    deal_reason = extract_deal_reason(item["itemName"])
-    hook = random.choice(ENGAGEMENT_HOOKS)
+def classify_genre_category(item_name: str) -> str:
+    """商品名から簡易的にジャンルカテゴリを判定する。"""
+    for category in ("seasonal", "appliance", "daily", "food"):
+        for kw in _GENRE_KEYWORDS[category]:
+            if kw in item_name:
+                return category
+    return "default"
 
-    hashtags = extract_hashtags(item["itemName"])
-    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
 
-    # 「お得な理由」を軸にした投稿文のバリエーション(順位への言及はしない、リンクなし)
-    templates = [
+# ジャンル別の投稿文テンプレート。
+# 「悩み共感型」「数字訴求型」「季節・タイミング訴求型」など、
+# Threadsで反応が取りやすいとされる型に沿って分けている。
+def _daily_templates(name, price, shop, deal_reason, hashtag_line) -> list:
+    """日用品・消耗品向け: 悩み共感型"""
+    return [
+        (
+            f"😳 {name}ってどれも同じだと思ってたけど、これは別格だった…\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}(税込)\n"
+            f"🏪 {shop}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"使い心地がまるで違って、一度使うと他のに戻れなくなるやつ。\n\n"
+            f"これ使ってる人、他にどんな商品使ってるか気になる🤔\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"🧴 地味だけど、この差は大きいと思う\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"毎日使うものだからこそ、ちょっとの違いが積み重なる気がしてる。\n\n"
+            f"日用品、みんなはどこにこだわってる？\n\n"
+            f"{hashtag_line}"
+        ),
+    ]
+
+
+def _appliance_templates(name, price, shop, deal_reason, hashtag_line) -> list:
+    """家電・時短グッズ向け: 数字訴求型"""
+    return [
+        (
+            f"⏱️ 毎日の面倒な作業、これで一気に楽になった\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n"
+            f"🏪 {shop}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"最初は半信半疑だったけど、使い出すと手放せなくなるタイプの商品。\n\n"
+            f"同じような時短グッズでおすすめあったら教えてほしい👀\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"🔌 これ知らずに今まで損してた気がする\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"面倒だった工程がまるごと自動化されるタイプで、地味に時間を作ってくれる。\n\n"
+            f"こういうガジェット系、他にも気になってる人いる？\n\n"
+            f"{hashtag_line}"
+        ),
+    ]
+
+
+def _seasonal_templates(name, price, shop, deal_reason, hashtag_line) -> list:
+    """季節性の高い商品向け: 季節・タイミング訴求型"""
+    return [
+        (
+            f"🌡️ そろそろこれ買わないと詰む季節がきた\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n"
+            f"🏪 {shop}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"去年これ知らずに乗り切って後悔した人、今年は先手打とう。\n\n"
+            f"みんなは対策済み？まだの人いる？\n\n"
+            f"{hashtag_line}"
+        ),
+        (
+            f"⏳ 今のうちに準備しておきたいやつ\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n\n"
+            f"✅ {deal_reason}\n\n"
+            f"直前になって焦って探すより、今のタイミングで押さえておく方が絶対ラク。\n\n"
+            f"この季節、他に必須だと思うアイテムある？\n\n"
+            f"{hashtag_line}"
+        ),
+    ]
+
+
+def _default_templates(name, price, shop, deal_reason, hashtag_line, hook) -> list:
+    """上記どれにも当てはまらない場合の汎用テンプレート(お得訴求型)"""
+    return [
         (
             f"🛍️ これはお得！と思わず紹介したくなった商品\n\n"
             f"📦 {name}\n"
@@ -272,6 +367,37 @@ def build_post_text(item: dict) -> tuple:
             f"{hashtag_line}"
         ),
     ]
+
+
+def build_post_text(item: dict) -> tuple:
+    """
+    投稿本文(リンクなし)とリプライ本文(リンクあり)のタプルを返す。
+    リンクは1通目の本文ではなく、リプライとして投稿する。
+    商品名からジャンルを判定し、ジャンルに合った型(悩み共感型/数字訴求型/
+    季節訴求型/汎用お得訴求型)のテンプレートを使う。
+    """
+    name = clean_item_name(item["itemName"])
+    if len(name) > 50:
+        name = name[:47] + "..."
+
+    price = f"{int(item['itemPrice']):,}円"
+    shop = item["shopName"]
+    url = item["itemUrl"]
+    deal_reason = extract_deal_reason(item["itemName"])
+    hook = random.choice(ENGAGEMENT_HOOKS)
+
+    hashtags = extract_hashtags(item["itemName"])
+    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
+
+    category = classify_genre_category(item["itemName"])
+    if category == "daily":
+        templates = _daily_templates(name, price, shop, deal_reason, hashtag_line)
+    elif category == "appliance":
+        templates = _appliance_templates(name, price, shop, deal_reason, hashtag_line)
+    elif category == "seasonal":
+        templates = _seasonal_templates(name, price, shop, deal_reason, hashtag_line)
+    else:
+        templates = _default_templates(name, price, shop, deal_reason, hashtag_line, hook)
 
     main_text = random.choice(templates)
 
