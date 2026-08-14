@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-楽天市場総合ランキングAPIから「1位の商品」を取得し、
+楽天市場総合ランキングAPI、またはキーワード検索APIから商品を取得し、
 未投稿であればThreadsに自動投稿するスクリプト。
+
+【キーワード検索対応版】
+  - RAKUTEN_KEYWORD(単一)または RAKUTEN_KEYWORDS(カンマ区切り、自動実行時に
+    ランダムで1つ選択)を指定すると、ジャンル総合ランキングの代わりに
+    そのキーワードの商品検索結果(人気順)から上位→未投稿のものを投稿する
+  - どちらも未指定の場合は、従来どおりジャンル総合ランキング(RAKUTEN_GENRE_ID)
+    から投稿する
 
 【アルゴリズム対策版】
   - 本文にはリンクを含めず、投稿後にリプライとしてリンクを投稿する
@@ -20,7 +27,12 @@
   THREADS_USER_ID       ThreadsのユーザーID(数値)
 
 任意の環境変数:
-  RAKUTEN_GENRE_ID       ランキングを取得するジャンルID(未指定 or 0で総合ランキング)
+  RAKUTEN_KEYWORD        商品検索するキーワードを直接指定する(手動実行向け)。
+                         指定されていればRAKUTEN_KEYWORDSより優先される。
+  RAKUTEN_KEYWORDS       カンマ区切りのキーワード候補(例: "扇風機,加湿器,掃除機")。
+                         自動実行(cron)時はこの中からランダムに1つ選ばれる。
+  RAKUTEN_GENRE_ID       ランキングを取得するジャンルID(未指定 or 0で総合ランキング)。
+                         RAKUTEN_KEYWORD/RAKUTEN_KEYWORDSが未指定の場合のみ使われる。
                          ジャンルIDは楽天ジャンル検索APIや以下を参照:
                          https://webservice.rakuten.co.jp/documentation/genre-search
   JITTER_MAX_SECONDS     投稿実行前に待機する最大秒数(既定: 900 = 15分)。
@@ -39,6 +51,11 @@ import requests
 
 # 2026年の楽天API移行対応: 新エンドポイント(openapi.rakuten.co.jp)+ accessKey必須
 RAKUTEN_RANKING_URL = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601"
+# 商品検索API(キーワード検索用)。ランキングAPIと同じ新基盤(openapi.rakuten.co.jp)。
+# 2026年8月17日に本バージョン(20220601)が廃止される可能性がある旨のアナウンスがあるため、
+# もしこのURLでエラーが出るようになったら、バージョンを20260401に変更して再試行すること
+# (パラメータ自体はkeyword/sort/hits等ほぼ変わらない見込み)。
+RAKUTEN_SEARCH_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601"
 THREADS_API_BASE = "https://graph.threads.net/v1.0"
 
 POSTED_FILE = Path(__file__).resolve().parent.parent / "data" / "posted.json"
@@ -115,6 +132,81 @@ def fetch_ranking_items() -> list:
             }
         )
     return items
+
+
+def fetch_items_by_keyword(keyword: str) -> list:
+    """
+    指定キーワードで商品検索し、人気順(標準ソート)で並んだ商品一覧を返す。
+    楽天のランキングAPIはジャンル単位でしか取得できずキーワード指定ができないため、
+    キーワード指定時は商品検索APIを使い、sort=standard(標準/人気順に近い並び)で
+    代用する。返り値の並び順がそのまま「そのキーワードでの上位」として扱われる。
+    """
+    app_id = os.environ["RAKUTEN_APP_ID"]
+    access_key = os.environ["RAKUTEN_ACCESS_KEY"]
+    affiliate_id = os.environ.get("RAKUTEN_AFFILIATE_ID", "")
+
+    params = {
+        "applicationId": app_id,
+        "accessKey": access_key,
+        "affiliateId": affiliate_id,
+        "keyword": keyword,
+        "hits": RANKING_FETCH_COUNT,
+        "sort": "standard",
+        "format": "json",
+        "page": 1,
+    }
+
+    headers = {
+        "Referer": "https://www.rakuten.co.jp/",
+    }
+
+    resp = requests.get(RAKUTEN_SEARCH_URL, params=params, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        print(f"楽天APIエラーレスポンス: {resp.status_code}", file=sys.stderr)
+        print(resp.text, file=sys.stderr)
+    resp.raise_for_status()
+    data = resp.json()
+
+    items = []
+    for entry in data.get("Items", [])[:RANKING_FETCH_COUNT]:
+        item = entry["Item"]
+        items.append(
+            {
+                "itemCode": item["itemCode"],
+                "itemName": item["itemName"],
+                "itemPrice": int(item["itemPrice"]),
+                "itemUrl": item["affiliateUrl"] or item["itemUrl"],
+                "shopName": item["shopName"],
+                # 商品検索結果には楽天側の「順位」概念が無いため、
+                # 返ってきた並び順(=人気順に近いsort=standardの順)をそのまま
+                # 順位として扱う(1始まり)。
+                "rank": len(items) + 1,
+            }
+        )
+    return items
+
+
+def resolve_keyword() -> str:
+    """
+    今回の実行で使うキーワードを決定する。
+      1. RAKUTEN_KEYWORD が指定されていればそれを最優先で使う(手動実行向け)
+      2. 未指定なら RAKUTEN_KEYWORDS (カンマ区切り) からランダムに1つ選ぶ
+         (自動実行/cron時に、複数キーワードの中から毎回自動で選択される)
+      3. どちらも空ならジャンルランキングモードにフォールバックするため
+         空文字列を返す
+    """
+    keyword = os.environ.get("RAKUTEN_KEYWORD", "").strip()
+    if keyword:
+        return keyword
+
+    keywords_raw = os.environ.get("RAKUTEN_KEYWORDS", "")
+    keyword_list = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    if keyword_list:
+        chosen = random.choice(keyword_list)
+        print(f"RAKUTEN_KEYWORDSから自動選択: {chosen} (候補: {keyword_list})")
+        return chosen
+
+    return ""
 
 
 # ハッシュタグ抽出時に除外する一般的すぎる単語
@@ -479,8 +571,15 @@ def main() -> int:
 
     posted_ids = load_posted_ids()
 
+    keyword = resolve_keyword()
+
     try:
-        items = fetch_ranking_items()
+        if keyword:
+            print(f"モード: キーワード検索 (keyword={keyword})")
+            items = fetch_items_by_keyword(keyword)
+        else:
+            print("モード: ジャンル総合ランキング")
+            items = fetch_ranking_items()
     except Exception as e:
         print(f"楽天APIの取得に失敗しました: {e}", file=sys.stderr)
         return 1
@@ -494,7 +593,8 @@ def main() -> int:
             break
 
     if not candidates:
-        print(f"楽天ランキング1〜{RANKING_FETCH_COUNT}位はすべて投稿済みです(順位変動待ち)。")
+        label = f"キーワード「{keyword}」の検索結果" if keyword else f"楽天ランキング1〜{RANKING_FETCH_COUNT}位"
+        print(f"{label}はすべて投稿済みです(順位変動待ち)。")
         return 0
 
     posted_count = 0
