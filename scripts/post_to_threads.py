@@ -581,6 +581,11 @@ def build_post_text(item: dict) -> tuple:
     ]
     reply_text = random.choice(reply_templates)
 
+    # リプライ本文にはハッシュタグを付けない仕様のため、
+    # 商品名などに"#"を含む文字列が万一残っていた場合に備えて、
+    # ハッシュタグ的な記述("#〜")を安全のため除去しておく。
+    reply_text = re.sub(r"(?:^|\s)#\S+", "", reply_text).strip()
+
     # リプライも念のため文字数上限を超えないよう切り詰める
     if len(reply_text) > THREADS_TEXT_MAX_LENGTH:
         reply_text = reply_text[: THREADS_TEXT_MAX_LENGTH - 1] + "…"
