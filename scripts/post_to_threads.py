@@ -59,10 +59,11 @@ import requests
 # 2026年の楽天API移行対応: 新エンドポイント(openapi.rakuten.co.jp)+ accessKey必須
 RAKUTEN_RANKING_URL = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601"
 # 商品検索API(キーワード検索用)。ランキングAPIと同じ新基盤(openapi.rakuten.co.jp)。
-# 2026年8月17日に本バージョン(20220601)が廃止される可能性がある旨のアナウンスがあるため、
-# もしこのURLでエラーが出るようになったら、バージョンを20260401に変更して再試行すること
-# (パラメータ自体はkeyword/sort/hits等ほぼ変わらない見込み)。
-RAKUTEN_SEARCH_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601"
+# 旧バージョン(20220601)は2026年8月18日付で廃止されたため、20260701に変更済み。
+# 今後さらに新しいバージョンが出た場合にエラーになったら、
+# https://webservice.rakuten.co.jp/documentation/ichiba-item-search
+# で最新バージョンを確認し、この値を差し替えること。
+RAKUTEN_SEARCH_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
 THREADS_API_BASE = "https://graph.threads.net/v1.0"
 
 POSTED_FILE = Path(__file__).resolve().parent.parent / "data" / "posted.json"
