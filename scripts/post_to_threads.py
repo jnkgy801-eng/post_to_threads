@@ -293,6 +293,11 @@ def extract_hashtags(item_name: str, max_tags: int = 3) -> list:
             continue
         if re.fullmatch(r"[0-9]+[日時分月]?", token):
             continue
+        # 「ランキング1位」「1位」「ランキング」のような順位関連の語は、
+        # Threads上でユーザー名の横にトピックタグとして目立って表示されてしまい
+        # 不自然なため、ハッシュタグ候補から除外する。
+        if re.search(r"ランキング|\d+位", token):
+            continue
         if token in seen:
             continue
         seen.add(token)
