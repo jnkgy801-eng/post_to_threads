@@ -361,49 +361,68 @@ def classify_genre_category(item_name: str) -> str:
     return "default"
 
 
-# ジャンルごとの見た目(先頭・末尾の絵文字、締めの一言)。
-# 「🫧 商品名✨ / 💰価格 / ✅特徴 ✅特徴 / 締めの一言 / ハッシュタグ」という
-# 短いフォーマットに使う。
-_CATEGORY_STYLE = {
+# ジャンルごとの「問いかけ・会話誘発型」フォールバック素材。
+# 構成: 共感フック(1行) → 二択質問 → 締め(コメント誘導)
+# Gemini API未使用時でも、商品名やURLを出さず「話題提起」に徹する点はAI生成版と揃える。
+_CATEGORY_HOOKS = {
     "daily": {
-        "lead_emoji": "🧴",
-        "tail_emoji": ["✨", "💫", "🌿"],
-        "closing": [
-            "使うたびに違いを実感できると評判🌿",
-            "毎日使うものだから、この差は大きい🌿",
+        "hook": [
+            "毎日使う日用品、ちゃんと選んでる人と何となく選んでる人で"
+            "結構差が出ますよね",
+            "日用品まわり、地味に「もっと早く知りたかった」ってなること多くないですか",
         ],
+        "question": [
+            "みんなは「安さ重視」派？それとも「多少高くても質重視」派？",
+            "ストック派？使い切ってから買う派？",
+        ],
+        "closing": "コメントで教えてください🙏",
     },
     "appliance": {
-        "lead_emoji": "⚡",
-        "tail_emoji": ["✨", "🔥"],
-        "closing": [
-            "口コミでも高評価の人気アイテム⚡",
-            "時短効果は使ってみるとよく分かる⚡",
+        "hook": [
+            "家電って「安い方」を買うか「ちょっと良い方」を買うかで"
+            "後々の満足度めちゃくちゃ変わりません？",
+            "家電選び、スペック重視で失敗した経験ある人多そうな気がしてます",
         ],
+        "question": [
+            "みんなは家電選ぶとき「価格」と「機能」どっちを優先します？",
+            "型落ちでも安い方派？最新機能ある方派？",
+        ],
+        "closing": "コメントで教えてください🙏",
     },
     "seasonal": {
-        "lead_emoji": "🌡️",
-        "tail_emoji": ["☀️", "❄️", "✨"],
-        "closing": [
-            "この季節に手放せなくなると評判🌿",
-            "今のうちに備えておきたい一品🌿",
+        "hook": [
+            "この時期になると毎年「もっと早く対策すればよかった」って"
+            "なりません？",
+            "季節モノの対策グッズ、ギリギリになって焦って買う人多い気がしてます",
         ],
+        "question": [
+            "みんなは早め準備派？必要になってから買う派？",
+            "毎年同じもの買い直す派？新しいの試す派？",
+        ],
+        "closing": "コメントで教えてください🙏",
     },
     "food": {
-        "lead_emoji": "🍪",
-        "tail_emoji": ["✨", "🌿"],
-        "closing": [
-            "リピーター続出の人気商品🌿",
-            "レビューでも高評価の一品🌿",
+        "hook": [
+            "同じジャンルの食品でも、選ぶブランドで満足度が全然違うこと"
+            "ありますよね",
+            "お取り寄せ系、当たり外れある気がして選ぶの迷いません？",
         ],
+        "question": [
+            "みんなは定番だけリピートする派？新商品も気になったら試す派？",
+            "自分用と贈答用、選び方変えます？",
+        ],
+        "closing": "コメントで教えてください🙏",
     },
     "default": {
-        "lead_emoji": "🛍️",
-        "tail_emoji": ["✨", "💕"],
-        "closing": [
-            "レビューでも高評価の人気アイテム🌿",
-            "コスパの良さで選ばれている一品✨",
+        "hook": [
+            "似たような商品がたくさんある中で選ぶの、地味に悩みません？",
+            "買ってから「もっと早く知りたかった」ってなるもの、結構ある気がしてます",
         ],
+        "question": [
+            "みんなは口コミ重視派？直感で決める派？",
+            "定番一択派？新しいの気になったら試す派？",
+        ],
+        "closing": "コメントで教えてください🙏",
     },
 }
 
@@ -433,26 +452,30 @@ def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: st
     model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-    style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
-
     prompt = (
-        "あなたは楽天アフィリエイトの投稿文を作る日本語のコピーライターです。\n"
-        "以下の商品情報をもとに、Threads(旧Twitter Threads)に投稿する短い紹介文を"
-        "1本だけ作ってください。\n\n"
+        "あなたはThreads運用歴の長いプロのアフィリエイターです。\n"
+        "以下の商品情報をもとに、Threadsで会話(リプライ)が生まれやすい"
+        "「問いかけ・会話誘発型」の投稿本文を1本だけ作ってください。\n\n"
         "【商品情報】\n"
         f"商品名: {item['itemName']}\n"
         f"価格: {price}\n"
-        f"お得ポイント: {deal_reason}\n\n"
-        "【出力フォーマット】(絵文字の位置・改行の入れ方も含め、必ずこの形式に従うこと)\n"
-        f"{style['lead_emoji']} 商品名を20文字程度に要約したもの(末尾に絵文字1つ)\n\n"
-        "💰 価格(税込)\n\n"
-        "✅ 特徴を一言で(1〜2行、各20文字以内)\n\n"
-        "締めの一言(15〜25文字程度、絵文字1つ)\n\n"
+        f"お得ポイント: {deal_reason}\n"
+        f"ジャンル: {category}\n\n"
+        "【構成ルール】(必ずこの3ブロック構成にすること)\n"
+        "1. 共感を誘う一言(このジャンルで多くの人が悩みがちなこと、"
+        "または「〜な人多くないですか？」のような投げかけ)\n"
+        "2. 自分の実体験や失敗談・気づきを1〜2行で(一人称・カジュアルな口調)\n"
+        "3. 読者に選ばせる二択質問、または「コメントで教えてください」等の"
+        "リプライを促す一文で締める\n\n"
         "【厳守事項】\n"
-        "- 商品URL・リンクは絶対に含めない(このあと別途リプライとして投稿するため)\n"
-        "- 「#PR」などのハッシュタグは絶対に含めない(このあと別途付与するため)\n"
+        "- 商品名・価格・URLは本文中に一切出さない(商品はあとでリプライとして紹介するため、"
+        "この本文はあくまで『話題提起』に徹すること)\n"
+        "- 「いいねしてください」「フォローお願いします」のような直接的な"
+        "エンゲージメント依頼はしない\n"
+        "- ハッシュタグは含めない(このあと別途付与するため)\n"
         "- 医学的な効能・効果を断定する表現や、誇大な表現は使わない\n"
         "- 未成年に関する表現は使わない\n"
+        "- 絵文字は多用しすぎず、1〜2個程度に留める\n"
         "- 出力は投稿文の本文のみとし、前置き・説明・コードブロック記号(```)は一切付けない\n"
     )
 
@@ -489,22 +512,16 @@ def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: st
 def build_template_post_text(item: dict, name: str, price: str, deal_reason: str, category: str) -> str:
     """
     Gemini APIが使えない場合のフォールバックとして使う、
-    従来通りの固定テンプレートによる本文生成(ハッシュタグは含まない)。
+    「問いかけ・会話誘発型」の固定テンプレートによる本文生成。
+    AI生成版と同じく、商品名・価格・URLはここでは出さず、
+    共感フック→二択質問→コメント誘導、の3行構成にする。
     """
-    bullets = build_feature_bullets(deal_reason)
-    style = _CATEGORY_STYLE.get(category, _CATEGORY_STYLE["default"])
-    tail_emoji = random.choice(style["tail_emoji"])
-    closing = random.choice(style["closing"])
+    hooks = _CATEGORY_HOOKS.get(category, _CATEGORY_HOOKS["default"])
+    hook = random.choice(hooks["hook"])
+    question = random.choice(hooks["question"])
+    closing = hooks["closing"]
 
-    lines = [
-        f"{style['lead_emoji']} {name}{tail_emoji}",
-        f"💰 {price}(税込)",
-    ]
-    if bullets:
-        lines.append("\n".join(f"✅ {b}" for b in bullets))
-    lines.append(closing)
-
-    return "\n\n".join(lines)
+    return "\n\n".join([hook, question, closing])
 
 
 def build_post_text(item: dict) -> tuple:
@@ -513,14 +530,12 @@ def build_post_text(item: dict) -> tuple:
     リンクは1通目の本文ではなく、リプライとして投稿する。
 
     本文はまずGemini API(無料枠)での生成を試み、
-    GEMINI_API_KEY未設定またはAPI失敗時は、従来の固定テンプレートに
-    フォールバックする。いずれの場合も最終的な形は下記の通り:
-      🧴 商品名✨
-      💰 価格(税込)
-      ✅ 特徴1
-      ✅ 特徴2
-      締めの一言
+    GEMINI_API_KEY未設定またはAPI失敗時は、固定テンプレートに
+    フォールバックする。いずれの場合も「問いかけ・会話誘発型」構成:
+      共感フック(1〜2行)
+      二択質問 or コメント誘導
       #ハッシュタグ #PR
+    商品名・価格・URLは本文に含めず、リプライ側でまとめて紹介する。
     """
     name = clean_item_name(item["itemName"])
     # 短いフォーマットに合わせて、商品名も簡潔な長さに収める
@@ -550,13 +565,19 @@ def build_post_text(item: dict) -> tuple:
 
     print(f"本文生成: {'Gemini API' if used_ai else 'テンプレート'}")
 
-    # リプライ本文(リンクはここに集約する)
+    # リプライ本文(リンクはここに集約する)。
+    # 本文の「話題提起」を受けて、「ちなみに自分が使ってるのはこれ」という
+    # 自然な流れで商品名・お得ポイント・価格・リンクをまとめて紹介する。
     reply_templates = [
-        f"詳細・購入はこちら👇\n{url}",
-        f"商品ページはこちら👇\n{url}",
-        f"気になった方はこちらからチェックできます👇\n{url}",
+        f"ちなみに自分が使ってるのはこれです\n{name}\n{deal_reason}・{price}\n{url}",
+        f"個人的に今気になってるのがこれ\n{name}\n{deal_reason}でこの価格({price})はかなりお得でした\n{url}",
+        f"ちなみに自分はこれを選びました\n{name}\n{deal_reason}\n{price}\n{url}",
     ]
     reply_text = random.choice(reply_templates)
+
+    # リプライも念のため文字数上限を超えないよう切り詰める
+    if len(reply_text) > THREADS_TEXT_MAX_LENGTH:
+        reply_text = reply_text[: THREADS_TEXT_MAX_LENGTH - 1] + "…"
 
     return main_text, reply_text
 
