@@ -6,9 +6,7 @@ on:
     # cronの起動自体をきっちり0分にしないことに加え、スクリプト内でも
     # ランダムなジッターを入れて実際の投稿時刻をさらにずらしている
     - cron: "7 3 * * *"
-    - cron: "21 10 * * *"
     - cron: "38 12 * * *"
-    - cron: "12 13 * * *"
   workflow_dispatch:
     inputs:
       jitter_max_seconds:
