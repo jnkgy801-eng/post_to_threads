@@ -467,21 +467,22 @@ def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: st
         f"価格: {price}\n"
         f"お得ポイント: {deal_reason}\n"
         f"ジャンル: {category}\n\n"
-        "【構成ルール】(必ずこの3ブロック構成にすること)\n"
+        "【構成ルール】(必ずこの2要素構成にすること)\n"
         "1. 共感を誘う一言(このジャンルで多くの人が悩みがちなこと、"
         "または「〜な人多くないですか？」のような投げかけ)\n"
-        "2. 自分の実体験や失敗談・気づきを1〜2行で(一人称・カジュアルな口調)\n"
-        "3. 読者に選ばせる二択質問、または「コメントで教えてください」等の"
+        "2. 読者に選ばせる二択質問、または「コメントで教えてください」等の"
         "リプライを促す一文で締める\n\n"
         "【厳守事項】\n"
+        "- 全体で日本語100文字程度(最大でも120文字以内)に収めること。"
+        "簡潔さを最優先し、余計な説明を入れない\n"
         "- 商品名・価格・URLは本文中に一切出さない(商品はあとでリプライとして紹介するため、"
         "この本文はあくまで『話題提起』に徹すること)\n"
         "- 「いいねしてください」「フォローお願いします」のような直接的な"
         "エンゲージメント依頼はしない\n"
-        "- ハッシュタグは含めない(このあと別途付与するため)\n"
+        "- ハッシュタグは一切含めない\n"
         "- 医学的な効能・効果を断定する表現や、誇大な表現は使わない\n"
         "- 未成年に関する表現は使わない\n"
-        "- 絵文字は多用しすぎず、1〜2個程度に留める\n"
+        "- 絵文字は多用しすぎず、1個程度に留める\n"
         "- 出力は投稿文の本文のみとし、前置き・説明・コードブロック記号(```)は一切付けない\n"
     )
 
@@ -489,7 +490,7 @@ def generate_ai_post_text(item: dict, category: str, price: str, deal_reason: st
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.9,
-            "maxOutputTokens": 300,
+            "maxOutputTokens": 150,
         },
     }
 
@@ -553,23 +554,19 @@ def build_post_text(item: dict) -> tuple:
     deal_reason = extract_deal_reason(item["itemName"])
     category = classify_genre_category(item["itemName"])
 
-    hashtags = extract_hashtags(item["itemName"])
-    hashtag_line = " ".join(hashtags + ["#PR"]) if hashtags else "#PR"
-
     body_text = generate_ai_post_text(item, category, price, deal_reason)
     used_ai = bool(body_text)
     if not body_text:
         body_text = build_template_post_text(item, name, price, deal_reason, category)
 
-    main_text = f"{body_text}\n\n{hashtag_line}"
+    # ハッシュタグは付けない仕様のため、本文はbody_textのみ。
+    main_text = body_text
 
     # Threadsの文字数上限(500文字)を超えないよう安全のため切り詰める
     if len(main_text) > THREADS_TEXT_MAX_LENGTH:
-        overflow = len(main_text) - THREADS_TEXT_MAX_LENGTH
-        body_text = body_text[: max(0, len(body_text) - overflow - 1)] + "…"
-        main_text = f"{body_text}\n\n{hashtag_line}"
+        main_text = main_text[: THREADS_TEXT_MAX_LENGTH - 1] + "…"
 
-    print(f"本文生成: {'Gemini API' if used_ai else 'テンプレート'}")
+    print(f"本文生成: {'Gemini API' if used_ai else 'テンプレート'} (文字数: {len(main_text)})")
 
     # リプライ本文(リンクはここに集約する)。
     # 本文の「話題提起」を受けて、「ちなみに自分が使ってるのはこれ」という
