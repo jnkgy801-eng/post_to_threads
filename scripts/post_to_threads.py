@@ -100,6 +100,29 @@ def apply_startup_jitter() -> None:
     time.sleep(wait_seconds)
 
 
+def resolve_affiliate_url(item: dict) -> str:
+    """
+    アフィリエイトURLを厳密にチェックして返す。
+    楽天APIは affiliateId パラメータが正しく効いた場合のみ affiliateUrl を
+    返す仕様のため、取得できていない場合はここで警告ログを出す。
+    これを怠ると、アフィリエイトIDが誤っている/未設定であっても
+    通常URL(itemUrl)へ静かにフォールバックしてしまい、
+    投稿自体は成功するのにクリックが一切計測されない、という
+    気づきにくい不具合につながる。
+    """
+    affiliate_url = item.get("affiliateUrl", "")
+    if affiliate_url:
+        return affiliate_url
+
+    print(
+        f"[警告] affiliateUrlが取得できませんでした(itemCode={item.get('itemCode')})。"
+        " RAKUTEN_AFFILIATE_IDの設定、または商品自体のアフィリエイト対象可否を"
+        " 確認してください。このまま通常URLで投稿すると成果は計測されません。",
+        file=sys.stderr,
+    )
+    return item.get("itemUrl", "")
+
+
 def fetch_ranking_items() -> list:
     app_id = os.environ["RAKUTEN_APP_ID"]
     access_key = os.environ["RAKUTEN_ACCESS_KEY"]
@@ -134,7 +157,7 @@ def fetch_ranking_items() -> list:
                 "itemCode": item["itemCode"],
                 "itemName": item["itemName"],
                 "itemPrice": int(item["itemPrice"]),
-                "itemUrl": item["affiliateUrl"] or item["itemUrl"],
+                "itemUrl": resolve_affiliate_url(item),
                 "shopName": item["shopName"],
                 "rank": item.get("rank"),
             }
@@ -183,7 +206,7 @@ def fetch_items_by_keyword(keyword: str) -> list:
                 "itemCode": item["itemCode"],
                 "itemName": item["itemName"],
                 "itemPrice": int(item["itemPrice"]),
-                "itemUrl": item["affiliateUrl"] or item["itemUrl"],
+                "itemUrl": resolve_affiliate_url(item),
                 "shopName": item["shopName"],
                 # 商品検索結果には楽天側の「順位」概念が無いため、
                 # 返ってきた並び順(=人気順に近いsort=standardの順)をそのまま
@@ -653,6 +676,15 @@ def post_to_threads(main_text: str, reply_text: str) -> None:
 
 
 def main() -> int:
+    # アフィリエイトID未設定は「投稿はできるがクリックが一切計測されない」
+    # という気づきにくい不具合に直結するため、起動直後に明示的に警告する。
+    if not os.environ.get("RAKUTEN_AFFILIATE_ID", "").strip():
+        print(
+            "[警告] RAKUTEN_AFFILIATE_IDが未設定です。"
+            " このまま実行すると通常URL(非アフィリエイト)で投稿されます。",
+            file=sys.stderr,
+        )
+
     apply_startup_jitter()
 
     posted_ids = load_posted_ids()
