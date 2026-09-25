@@ -30,6 +30,9 @@
                          指定されていればRAKUTEN_KEYWORDSより優先される。
   RAKUTEN_KEYWORDS       カンマ区切りのキーワード候補(例: "扇風機,加湿器,掃除機")。
                          自動実行(cron)時はこの中からランダムに1つ選ばれる。
+                         未設定(空)の場合は、JSTの現在月に応じた定番ジャンルの
+                         季節デフォルト(SEASONAL_DEFAULT_KEYWORDS)から自動選択される
+                         ため、Secrets未設定でも実績の出やすいジャンルで投稿され続ける。
   RAKUTEN_GENRE_ID       ランキングを取得するジャンルID(未指定 or 0で総合ランキング)。
                          RAKUTEN_KEYWORD/RAKUTEN_KEYWORDSが未指定の場合のみ使われる。
                          ジャンルIDは楽天ジャンル検索APIや以下を参照:
@@ -52,9 +55,40 @@ import random
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
+
+# 楽天アフィリエイトで定番かつ実績が出やすいジャンルの月別デフォルト候補。
+# RAKUTEN_KEYWORDS(Secrets)が未設定の場合のフォールバックとして使われるため、
+# GitHub Actionsの自動実行(cron)でもSecretsを設定するだけで済み、
+# 季節に合わない商品が投稿され続ける事態を避けられる。
+# キーはJSTの月(1〜12)。
+SEASONAL_DEFAULT_KEYWORDS: dict[int, list[str]] = {
+    1: ["加湿器", "電気毛布", "空気清浄機", "鍋つゆ", "ロボット掃除機"],
+    2: ["加湿器", "電気毛布", "空気清浄機", "花粉対策マスク", "ロボット掃除機"],
+    3: ["花粉対策マスク", "空気清浄機", "ロボット掃除機", "洗濯洗剤", "プロテイン"],
+    4: ["ロボット掃除機", "洗濯洗剤", "プロテイン", "モバイルバッテリー", "ワイヤレスイヤホン"],
+    5: ["除湿機", "冷感タオル", "ロボット掃除機", "モバイルバッテリー", "ワイヤレスイヤホン"],
+    6: ["除湿機", "冷感タオル", "日傘", "携帯扇風機", "洗濯洗剤"],
+    7: ["携帯扇風機", "冷感タオル", "日傘", "ドリップコーヒー", "除湿機"],
+    8: ["携帯扇風機", "冷感タオル", "日傘", "ドリップコーヒー", "モバイルバッテリー"],
+    9: ["空気清浄機", "加湿器", "ロボット掃除機", "プロテイン", "ワイヤレスイヤホン"],
+    10: ["加湿器", "ロボット掃除機", "プロテイン", "洗濯洗剤", "モバイルバッテリー"],
+    11: ["加湿器", "電気毛布", "空気清浄機", "こたつ", "鍋つゆ"],
+    12: ["加湿器", "電気毛布", "こたつ", "鍋つゆ", "空気清浄機"],
+}
+
+
+def get_seasonal_default_keywords(now: datetime | None = None) -> list[str]:
+    """
+    JST基準の現在月に対応する、定番ジャンルのデフォルトキーワード候補を返す。
+    RAKUTEN_KEYWORDSが未設定の場合のフォールバックとして resolve_keyword() から呼ばれる。
+    """
+    jst_now = now or datetime.now(ZoneInfo("Asia/Tokyo"))
+    return SEASONAL_DEFAULT_KEYWORDS[jst_now.month]
 
 # 2026年の楽天API移行対応: 新エンドポイント(openapi.rakuten.co.jp)+ accessKey必須
 RAKUTEN_RANKING_URL = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601"
@@ -223,8 +257,9 @@ def resolve_keyword() -> str:
       1. RAKUTEN_KEYWORD が指定されていればそれを最優先で使う(手動実行向け)
       2. 未指定なら RAKUTEN_KEYWORDS (カンマ区切り) からランダムに1つ選ぶ
          (自動実行/cron時に、複数キーワードの中から毎回自動で選択される)
-      3. どちらも空ならジャンルランキングモードにフォールバックするため
-         空文字列を返す
+      3. RAKUTEN_KEYWORDS も未設定(空)の場合は、Secretsの設定漏れがあっても
+         定番ジャンルで投稿され続けるよう、JSTの現在月に応じた季節デフォルト
+         候補(SEASONAL_DEFAULT_KEYWORDS)からランダムに1つ選ぶ
     """
     keyword = os.environ.get("RAKUTEN_KEYWORD", "").strip()
     if keyword:
@@ -237,7 +272,11 @@ def resolve_keyword() -> str:
         print(f"RAKUTEN_KEYWORDSから自動選択: {chosen} (候補: {keyword_list})")
         return chosen
 
-    return ""
+    # RAKUTEN_KEYWORDS未設定時のフォールバック: 季節に応じた定番ジャンルを使う
+    seasonal_list = get_seasonal_default_keywords()
+    chosen = random.choice(seasonal_list)
+    print(f"季節デフォルトから自動選択: {chosen} (候補: {seasonal_list})")
+    return chosen
 
 
 # ハッシュタグ抽出時に除外する一般的すぎる単語
