@@ -1,38 +1,54 @@
-# 楽天ランキング → Threads 自動投稿
+# 楽天 → Buffer → Threads 予約投稿
 
-楽天市場の総合ランキングAPIから商品情報を取得し、Threadsへ自動投稿するGitHub Actions構成です。
-1日3回(JST 9:00 / 13:00 / 19:00)実行され、1回につき1件、未投稿の商品を投稿します。
+楽天市場の商品を選定し、**Buffer経由でThreadsに予約投稿**するGitHub Actions構成です。
+GitHub Actionsは1日1回(JST 6:00)だけ動き、直近48時間ぶんの投稿枠をBufferに予約します。
+実際の投稿はBufferが指定時刻に行います。
+
+## 投稿時刻(JST・既定)
+`12:10 / 18:45 / 21:45` + 各枠に最大8分のランダム遅延。
+日本のThreads利用調査(hotice, 2026/3)で利用が多かった「昼休み」「帰宅後〜夕食前」「就寝前」に合わせています。
+変更は `post.yml` の `POST_SLOTS_JST`(例: `07:45,12:10,18:45,21:45`)で行います。
+※ これは調査に基づく初期値です。Bufferの分析で反応の良い時間帯が分かったら調整してください。
+
+## 投稿内容
+- 本文: 固定コメント1行(AI不使用・約20文字)
+- リプライ: `【PR】商品名 / ★評価(件数) / 価格 / アフィリエイトURL`
+- 商品: 「季節の売れ筋 + 定番(美容・ガジェット・日用品・食品・おうち時間)」から、
+  価格500〜8,000円・レビュー★4.3以上(100件以上)を優先して選定。ふるさと納税・中古・医薬品・書籍等は除外。
 
 ## セットアップ手順
+### 1. 楽天ウェブサービス / アフィリエイト
+Application ID・Access Key・アフィリエイトIDを取得(従来どおり)。
 
-### 1. 楽天ウェブサービスの登録
-1. https://webservice.rakuten.co.jp/ でアカウント作成しApplication IDを取得
-2. 楽天アフィリエイトに登録し、アフィリエイトIDを取得
+### 2. Buffer
+1. https://buffer.com で登録し、**Threadsアカウントを接続**
+2. https://publish.buffer.com/settings/api で **APIキー**を発行
+3. 無料プランは「1チャンネルあたり予約10件まで」。本スクリプトは予約済み件数を見て上限を超えないようにします
 
-### 2. Threads APIの準備
-1. https://developers.facebook.com/ でアプリを作成し、「Threads API」を追加
-2. Threadsアカウント(Instagramアカウントと連携済み)をテストユーザーとして追加
-3. 認可フローで短期トークンを取得 → 長期トークン(60日)に交換
-4. Threadsのユーザーidを確認
+※ BufferがThreadsとの連携を保持するため、**Threads側の長期アクセストークン(60日で失効)の更新運用は不要**になります。
 
-### 3. GitHubリポジトリへの登録
-このフォルダの中身をリポジトリにpushし、Settings > Secrets and variables > Actions で以下を登録します。
-
+### 3. GitHub Secrets
 | Secret名 | 内容 |
 |---|---|
 | `RAKUTEN_APP_ID` | 楽天Application ID |
+| `RAKUTEN_ACCESS_KEY` | 楽天アクセスキー |
 | `RAKUTEN_AFFILIATE_ID` | 楽天アフィリエイトID |
-| `THREADS_ACCESS_TOKEN` | Threads長期アクセストークン |
-| `THREADS_USER_ID` | ThreadsユーザーID |
+| `BUFFER_API_KEY` | Buffer APIキー |
+| `BUFFER_CHANNEL_ID` | (任意)Threadsチャンネルが複数ある場合のみ |
+| `RAKUTEN_KEYWORDS` | (任意)カンマ区切りで検索キーワードを固定したい場合 |
 
-### 4. 動作確認
-Actionsタブから `Rakuten to Threads Auto Post` を選び、`Run workflow` で手動実行して動作を確認してください。
+不要になったSecrets: `THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` / `GEMINI_API_KEY` / `RAKUTEN_GENRE_ID`
+
+### 4. 動作確認(必ず先にドライラン)
+Actionsタブ → `Schedule Rakuten posts to Buffer (Threads)` → `Run workflow` → `dry_run` を **true** のまま実行。
+ログに予約予定の内容が出力されます(Bufferには送信されません)。問題なければ `dry_run` を **false** で実行してください。
 
 ## 運用上の注意
-- Threadsの長期アクセストークンは**60日で失効**します。期限が切れる前に手動、または別途リフレッシュ用のworkflowを用意して更新してください。
-- `data/posted.json` に投稿済みの商品コードを記録し、重複投稿を防いでいます。ワークフロー実行後に自動でコミットされます。
-- 投稿件数・時間帯は `scripts/post_to_threads.py` の `POSTS_PER_RUN` や `.github/workflows/post.yml` の `cron` を変更することで調整できます。
-- 楽天アフィリエイトの規約に沿った表記(#PR表記など)を必ず確認してください。
+- `data/posted.json` に予約済みの商品コードを記録し、重複を防ぎます(ワークフローが自動コミット)。
+- 同じ枠への二重予約はしません。何度実行しても安全です。
+- リプライ冒頭の `【PR】` はステルスマーケティング規制への対応です。削除しないでください。
+- 楽天アフィリエイトの規約・Threadsの利用規約も合わせて確認してください。
+- `scripts/post_to_threads.py`(旧・直接投稿スクリプト)は不要になったため削除してください。
 
  ## 楽天APIのジャンルID
 美容・コスメ・香水	─	100939　　スキンケア	─	100944　　ベースメイク・メイクアップ	─	204233
