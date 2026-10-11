@@ -1,31 +1,34 @@
-name: Rakuten to Threads Auto Post
+name: Schedule Rakuten posts to Buffer (Threads)
 
 on:
   schedule:
-    # JST 12:07 / 19:21 / 21:38 / 22:12 = UTC 3:07 / 10:21 / 12:38 / 13:12
-    # cronの起動自体をきっちり0分にしないことに加え、スクリプト内でも
-    # ランダムなジッターを入れて実際の投稿時刻をさらにずらしている
-    - cron: "7 3 * * *"
-    - cron: "38 12 * * *"
+    # JST 06:00 = UTC 21:00(前日)。1日1回、直近48時間ぶんの空き枠だけをBufferに予約する。
+    # 投稿時刻そのものは scripts/schedule_to_buffer.py の POST_SLOTS_JST で決まり、
+    # このcronの時刻や、GitHub側の起動遅延には依存しない。
+    - cron: "0 21 * * *"
   workflow_dispatch:
     inputs:
-      jitter_max_seconds:
-        description: "手動実行時のジッター最大秒数(即実行したい場合は0)"
-        required: false
-        default: "0"
+      dry_run:
+        description: "true: Bufferに送らず内容だけ確認 / false: 実際に予約する"
+        type: boolean
+        default: true
       keyword:
-        description: "手動実行時に検索するキーワード(空欄ならRAKUTEN_KEYWORDSからランダム選択、それも空ならジャンルランキング)"
+        description: "検索キーワードを固定したい場合のみ入力(空欄なら自動選定)"
         required: false
         default: ""
 
 permissions:
   contents: write
 
+# 同時実行すると同じ枠に二重予約・posted.jsonのpush競合が起きるため直列化する
+concurrency:
+  group: buffer-schedule
+  cancel-in-progress: false
+
 jobs:
-  post:
+  schedule:
     runs-on: ubuntu-latest
-    # ジッター(最大15分)を含めても余裕を持てるようタイムアウトを設定
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,37 +36,33 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install -r requirements.txt
 
-      - name: Post to Threads
+      - name: Schedule posts to Buffer
         env:
           RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
           RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
           RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
-          RAKUTEN_GENRE_ID: ${{ secrets.RAKUTEN_GENRE_ID || '0' }}
-          # 手動実行(workflow_dispatch)時はinputのkeywordを最優先で使う。
-          # スケジュール実行(自動実行)時はここは空になり、スクリプト側が
-          # RAKUTEN_KEYWORDSの中からランダムに1つを自動選択する。
-          RAKUTEN_KEYWORD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.keyword || '' }}
-          # 自動実行時に選択候補とするキーワード一覧(カンマ区切り)。
-          # 例: "扇風機,加湿器,掃除機,洗剤,モバイルバッテリー"
-          # リポジトリの Settings > Secrets and variables > Actions で設定する。
-          # 未設定(空)の場合は、従来どおりジャンル総合ランキング(RAKUTEN_GENRE_ID)から投稿する。
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          # Threadsチャンネルが複数ある場合のみ設定(任意)
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          # 任意: 空なら内蔵の「季節 + 定番」キーワードプールを使う
           RAKUTEN_KEYWORDS: ${{ secrets.RAKUTEN_KEYWORDS }}
-          # Google AI Studioで発行した無料枠のGemini APIキー。
-          # 未設定の場合は自動的に固定テンプレートでの投稿文生成にフォールバックする。
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
-          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
-          # スケジュール実行は最大900秒(15分)ゆらす。手動実行(workflow_dispatch)は
-          # 入力値を使う(デフォルト0=即実行)。
-          JITTER_MAX_SECONDS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.jitter_max_seconds || '900' }}
-        run: python scripts/post_to_threads.py
+          RAKUTEN_KEYWORD: ${{ github.event_name == 'workflow_dispatch' && inputs.keyword || '' }}
+          # スケジュール実行は常に本番(false)。手動実行はinputの値(既定true=ドライラン)
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          # 投稿時刻(JST)を変えたい場合は、ここのコメントを外して編集する
+          # POST_SLOTS_JST: "07:45,12:10,18:45,21:45"
+        run: python scripts/schedule_to_buffer.py
 
+      # 失敗した回でも、成功分の posted.json は必ず保存する(次回の重複投稿防止)
       - name: Commit posted items log
+        if: always() && env.DRY_RUN != 'true'
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
