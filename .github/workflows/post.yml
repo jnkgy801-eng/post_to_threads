@@ -54,8 +54,13 @@ jobs:
           RAKUTEN_KEYWORD: ${{ github.event_name == 'workflow_dispatch' && inputs.keyword || '' }}
           # スケジュール実行は常に本番(false)。手動実行はinputの値(既定true=ドライラン)
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
-          # 投稿時刻(JST)を変えたい場合は、ここのコメントを外して編集する
-          # POST_SLOTS_JST: "07:45,12:10,18:45,21:45"
+          # --- 任意の調整(変えたい場合のみコメントを外す) ---
+          # 商品投稿の時刻(JST)
+          # POST_SLOTS_JST: "12:10,18:45,21:45"
+          # 「質問のみ」投稿の時刻(JST)。none で無効化
+          # ENGAGE_SLOTS_JST: "07:45"
+          # 扱うジャンル。増やすほどアカウントのテーマが散るので、まずは暮らし系に絞るのを推奨
+          # NICHES: "storage,clean,home,seasonal"   # 他: beauty,gadget,food
         run: python scripts/schedule_to_buffer.py
 
       # 失敗した回でも、成功分の posted.json は必ず保存する(次回の重複投稿防止)
@@ -66,6 +71,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/posted.json
+          git add -A data/
           git diff --staged --quiet || git commit -m "chore: update posted items log"
           git push
