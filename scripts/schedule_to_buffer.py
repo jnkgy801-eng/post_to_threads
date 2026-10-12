@@ -6,7 +6,10 @@
 - 投稿そのものは Buffer が指定時刻に実行する(本スクリプトは予約を積むだけ)。
 - GitHub Actions で1日1回実行し、直近 LOOKAHEAD_HOURS 時間ぶんの「空いている投稿枠」だけを埋める。
   何度実行しても同じ枠に二重予約しない(冪等)。
-- 投稿文は AI を使わず、短い固定コメント + 商品リプライ(リンク)で構成する。
+- 投稿文は AI を使わず、手書きの「質問テンプレート」+ 商品リプライ(リンク)で構成する。
+  Threads は返信(会話)を最重視するため、本文は「商品名を含む二択/番号選択の質問」にし、
+  リンクは自分の投稿へのリプライ側に置く。トピックタグも自動で付ける。
+- 返信を誘うだけの「質問のみ投稿」(商品なし)も1日1回混ぜ、アカウント全体のリーチを底上げする。
 
 必須の環境変数:
   RAKUTEN_APP_ID / RAKUTEN_ACCESS_KEY / RAKUTEN_AFFILIATE_ID
@@ -14,7 +17,10 @@
 
 任意の環境変数:
   BUFFER_CHANNEL_ID         Threads チャンネルID(未指定ならThreadsチャンネルを自動検出)
-  POST_SLOTS_JST            投稿時刻(JST, カンマ区切り)  既定: 12:10,18:45,21:45
+  POST_SLOTS_JST            商品投稿の時刻(JST, カンマ区切り) 既定: 12:10,18:45,21:45
+  ENGAGE_SLOTS_JST          質問のみ投稿の時刻(JST)   既定: 07:45 (none で無効化)
+  NICHES                    扱うジャンル(カンマ区切り) 既定: storage,clean,home,seasonal
+                            選択肢: storage clean home seasonal beauty gadget food
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
   SLOT_JITTER_MINUTES       各枠に足すランダム分数        既定: 8
   MAX_SCHEDULED             予約の上限(無料プランは10)    既定: 10
@@ -55,32 +61,47 @@ HTTP_TIMEOUT = 30
 MAX_ATTEMPTS = 3
 
 # ---------------------------------------------------------------------------
-# 商品選定: Threads(20〜40代・女性比率高め・「暇つぶし/トレンド/商品検討」目的)で
-# 反応を取りやすい「安価・共感しやすい・レビューが豊富」なジャンルに寄せる。
+# 商品選定: Threads は「ニッチの一貫性」を評価するため、既定は「暮らし・便利グッズ」に絞る。
+# (検索キーワード, 投稿文に入れる表示名) のペア。表示名は自然な名詞にしておく。
 # ---------------------------------------------------------------------------
-EVERGREEN_KEYWORDS: dict[str, list[str]] = {
-    "beauty": ["シートマスク", "ヘアオイル", "リップ 保湿", "ハンドクリーム", "ボディクリーム", "日焼け止め"],
-    "gadget": ["モバイルバッテリー 軽量", "ワイヤレスイヤホン", "スマホスタンド", "ケーブル 収納", "USB 充電器"],
-    "daily": ["時短 便利グッズ", "隙間 収納", "洗濯洗剤", "キッチン 収納", "掃除 ブラシ"],
-    "food": ["プロテイン", "ドリップコーヒー", "個包装 お菓子", "ゼリー ドリンク", "インスタント スープ"],
-    "home": ["入浴剤", "アイマスク 温め", "ルームフレグランス", "着る毛布", "快眠 枕"],
+Pair = tuple[str, str]
+
+
+def _p(query: str, name: str | None = None) -> Pair:
+    return (query, name or query)
+
+
+NICHE_KEYWORDS: dict[str, list[Pair]] = {
+    "storage": [_p("収納ケース"), _p("隙間 収納", "隙間収納"), _p("ケーブル 収納", "ケーブル収納"),
+                _p("キッチン 収納", "キッチン収納"), _p("衣類 収納", "衣類収納")],
+    "clean": [_p("掃除 ブラシ", "掃除グッズ"), _p("洗濯洗剤"), _p("時短 便利グッズ", "時短グッズ"),
+              _p("排水口 ネット", "排水口ネット"), _p("スポンジ 食器洗い", "食器洗いスポンジ")],
+    "home": [_p("入浴剤"), _p("アイマスク 温め", "アイマスク"), _p("ルームフレグランス"),
+             _p("着る毛布"), _p("快眠 枕", "枕")],
+    # 以下は既定では使わない(NICHES で追加できる)
+    "beauty": [_p("シートマスク"), _p("ヘアオイル"), _p("リップ 保湿", "リップ"), _p("ハンドクリーム"), _p("日焼け止め")],
+    "gadget": [_p("モバイルバッテリー 軽量", "モバイルバッテリー"), _p("ワイヤレスイヤホン"),
+               _p("スマホスタンド"), _p("USB 充電器", "充電器")],
+    "food": [_p("プロテイン"), _p("ドリップコーヒー"), _p("個包装 お菓子", "お菓子"), _p("インスタント スープ", "スープ")],
 }
 
-# 月(JST)ごとの季節キーワード。「今必要」な商品は閲覧・クリックされやすい。
-SEASONAL_KEYWORDS: dict[int, list[str]] = {
-    1: ["加湿器", "電気毛布", "空気清浄機", "鍋つゆ", "ロボット掃除機"],
-    2: ["加湿器", "電気毛布", "空気清浄機", "花粉対策マスク", "ロボット掃除機"],
-    3: ["花粉対策マスク", "空気清浄機", "ロボット掃除機", "洗濯洗剤", "プロテイン"],
-    4: ["ロボット掃除機", "洗濯洗剤", "プロテイン", "モバイルバッテリー", "ワイヤレスイヤホン"],
-    5: ["除湿機", "冷感タオル", "ロボット掃除機", "モバイルバッテリー", "ワイヤレスイヤホン"],
-    6: ["除湿機", "冷感タオル", "日傘", "携帯扇風機", "洗濯洗剤"],
-    7: ["携帯扇風機", "冷感タオル", "日傘", "ドリップコーヒー", "除湿機"],
-    8: ["携帯扇風機", "冷感タオル", "日傘", "ドリップコーヒー", "モバイルバッテリー"],
-    9: ["空気清浄機", "加湿器", "ロボット掃除機", "プロテイン", "ワイヤレスイヤホン"],
-    10: ["加湿器", "着る毛布", "電気毛布", "ハンドクリーム", "洗濯洗剤"],
-    11: ["加湿器", "電気毛布", "空気清浄機", "こたつ", "鍋つゆ"],
-    12: ["加湿器", "電気毛布", "こたつ", "鍋つゆ", "空気清浄機"],
+# 月(JST)ごとの季節キーワード(暮らし・家電・日用品に限定)。「今必要」な商品は反応を取りやすい。
+SEASONAL_KEYWORDS: dict[int, list[Pair]] = {
+    1: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("結露 対策", "結露対策"), _p("ロボット掃除機")],
+    2: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("花粉 対策", "花粉対策"), _p("ロボット掃除機")],
+    3: [_p("花粉 対策", "花粉対策"), _p("空気清浄機"), _p("ロボット掃除機"), _p("洗濯洗剤"), _p("衣替え 収納", "衣替え収納")],
+    4: [_p("ロボット掃除機"), _p("洗濯洗剤"), _p("衣替え 収納", "衣替え収納"), _p("除湿剤"), _p("掃除 ブラシ", "掃除グッズ")],
+    5: [_p("除湿機"), _p("冷感タオル"), _p("ロボット掃除機"), _p("除湿剤"), _p("網戸 掃除", "網戸掃除")],
+    6: [_p("除湿機"), _p("冷感タオル"), _p("日傘"), _p("携帯扇風機"), _p("洗濯洗剤")],
+    7: [_p("携帯扇風機"), _p("冷感タオル"), _p("日傘"), _p("冷感 敷きパッド", "冷感敷きパッド"), _p("除湿機")],
+    8: [_p("携帯扇風機"), _p("冷感タオル"), _p("日傘"), _p("冷感 敷きパッド", "冷感敷きパッド"), _p("サーキュレーター")],
+    9: [_p("空気清浄機"), _p("加湿器"), _p("ロボット掃除機"), _p("衣替え 収納", "衣替え収納"), _p("サーキュレーター")],
+    10: [_p("加湿器"), _p("着る毛布"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ")],
+    11: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ"), _p("着る毛布")],
+    12: [_p("加湿器"), _p("電気毛布"), _p("こたつ"), _p("結露 対策", "結露対策"), _p("空気清浄機")],
 }
+DEFAULT_NICHES = "storage,clean,home,seasonal"
+VALID_NICHES = set(NICHE_KEYWORDS) | {"seasonal"}
 
 # 投稿対象から外す商品(規制商材・ふるさと納税・中古・予約など)
 NG_NAME = re.compile(r"ふるさと納税|中古|医薬品|第[1-3]類|コンタクト|アダルト|大人のおもちゃ|予約販売")
@@ -90,56 +111,71 @@ NG_SHOP = re.compile(r"^(f\d{6}-|book$)")  # 自治体(ふるさと納税)・書
 REVIEW_TIERS: tuple[tuple[float, int], ...] = ((4.3, 100), (4.0, 30))
 
 # ---------------------------------------------------------------------------
-# 固定コメント(1行・短文)。会話/保存を誘う共感系。
+# 投稿文テンプレート(手書き・AI不使用)。{n} に商品カテゴリ名が入る。
+# 設計方針(Threadsは「返信」を最重視):
+#   1) 何の話か分かるよう、必ず商品カテゴリ名を入れる(興味ベースの配信に必要)
+#   2) 末尾は必ず質問。「二択」「番号で答える」形式にして、返信のハードルを下げる
+#   3) 2〜3行・50字前後。短すぎる一言は滞在時間も伸びない
 # 薬機法・景表法の観点から、効能の断定や「自分が使った」等の体験の偽装は入れない。
 # ---------------------------------------------------------------------------
-HOOKS: dict[str, list[str]] = {
+TEMPLATES: dict[str, list[str]] = {
     "general": [
-        "これ、地味にレビュー高いやつ👀",
-        "気になってた人、多いはず",
-        "迷ってる人はこれ参考にして",
-        "保存しとくと後で助かるかも👇",
-        "レビュー数がすごいやつ見つけた",
-        "これ知ってた？",
+        "{n}を選ぶとき、一番重視するのはどれ？\n①価格 ②口コミ ③見た目\n番号で教えてください👇",
+        "{n}、リピ買いする派？\nそれとも毎回ちがうのを試す派？",
+        "{n}で「これだけは譲れない」ってポイント、ありますか？\nこだわりを聞きたいです👀",
+        "{n}、安いのと高いの、どっちを買う派？\n理由も知りたいです",
+        "{n}って、つい後回しにしがちじゃないですか？\nみなさんはどうしてますか？",
+        "{n}、今愛用しているものがあれば教えてください🙏\n参考にしたいです",
+        "{n}を買うとき、口コミは見ますか？\n①絶対見る ②たまに見る ③見ない",
+        "{n}で失敗したことある人、いますか？\nあるあるを聞きたい😂",
     ],
     "seasonal": [
-        "そろそろ必要になる季節、準備できてる？",
-        "ギリギリで焦る前にチェック👀",
-        "この時期になると探す人多いやつ",
-        "今のうちに見ておくと安心かも",
-        "毎年これ探してる人いない？",
+        "そろそろ{n}の季節ですね。\nもう準備しましたか？\n①もう買った ②これから ③毎年ギリギリ",
+        "{n}、毎年買い替える派？\nそれとも長く使う派？",
+        "{n}って、いつ頃から準備しますか？\n早め派？ギリギリ派？",
     ],
-    "beauty": [
-        "プチプラで評判いいやつ見つけた",
-        "お守りコスメに入れたいやつ👀",
-        "レビュー数すごい美容アイテム",
-        "気になってる人、保存しといて",
+    "storage": [
+        "{n}って、見せる派？隠す派？\nどっち派か教えてください👇",
+        "{n}、買ったのに使いこなせてない…ってことありませんか？\nあるある、聞かせてください😂",
     ],
-    "gadget": [
-        "あると地味に便利なやつ",
-        "持っておくと安心なやつ👀",
-        "ガジェット好きに刺さるやつ",
-        "コスパ良さそうなやつ見つけた",
-    ],
-    "daily": [
-        "地味に助かる日用品👀",
-        "買い置きしておきたいやつ",
-        "生活の小さなストレス減らしたい人へ",
-        "これ、保存しとく価値あるかも",
-    ],
-    "food": [
-        "ついリピしちゃいそうなやつ",
-        "小腹が空いたとき用に👇",
-        "ストック派の人、これどう？",
-        "ご褒美にちょうどいいやつ",
+    "clean": [
+        "{n}、こだわりありますか？\n①安さ重視 ②使い心地重視 ③とりあえず定番",
     ],
     "home": [
-        "おうち時間が少し快適になるやつ",
-        "寝る前にチェックしたいやつ👀",
-        "夜のリラックス用に保存して",
-        "癒やされたい人、これ気になる",
+        "おうち時間を快適にするのに、{n}って必要だと思いますか？\n①必須 ②あったら嬉しい ③なくて平気",
+        "{n}、使っている人いますか？\n使い心地を教えてほしいです👀",
     ],
+    "beauty": ["{n}、プチプラ派？デパコス派？\nその理由も聞きたいです👇"],
+    "gadget": ["{n}、ちゃんと良いものを買う派？コスパ重視派？\nどっちか教えてください👇"],
+    "food": ["{n}、ストックしておく派？\n食べたいときに買う派？"],
 }
+
+# 「質問のみ」投稿(商品なし・リンクなし)。誰でも答えられる広い話題で返信を集め、
+# アカウント全体のリーチを底上げする。広い質問ほど桁違いに伸びやすい。
+ENGAGEMENT_QUESTIONS: list[str] = [
+    "最近買ってよかったもの、1つだけ教えてください👇",
+    "「これは買って正解だった」って日用品、ありますか？\nジャンル問わず教えてください！",
+    "100均で「買ってよかった」ものは何ですか？",
+    "一人暮らしで「最初に買えばよかった」と思ったものは？",
+    "家事をラクにしてくれる神アイテム、あれば教えてください🙏",
+    "家の中で一番ストレスを感じる場所はどこ？\n①玄関 ②キッチン ③洗面所 ④クローゼット",
+    "ついつい溜まっちゃうものって何ですか？\n①紙類 ②ケーブル類 ③服 ④その他",
+    "寝る前のルーティン、みなさんは何してますか？👀",
+    "掃除するなら朝派？夜派？",
+    "休日の過ごし方、インドア派？アウトドア派？",
+    "1,000円以内で「生活の質が上がったもの」を教えてください！",
+    "部屋で一番長く過ごす場所はどこですか？\n①リビング ②寝室 ③ワークスペース",
+    "この季節になると買い足すもの、ありますか？",
+    "最近ちょっと贅沢したこと、ありますか？",
+]
+ENGAGEMENT_TOPIC = "暮らし"
+
+# トピックタグ(Threadsは1投稿1タグ)。ジャンルごとの広めのタグ。seasonalは商品名を使う。
+CATEGORY_TOPIC = {
+    "storage": "収納", "clean": "掃除", "home": "おうち時間",
+    "beauty": "プチプラコスメ", "gadget": "ガジェット", "food": "グルメ",
+}
+RECENT_KEEP = 12  # 直近N件のテンプレートは再利用しない(同じ文面の連投を避ける)
 
 PR_LABEL = "【PR】"  # ステマ規制対応。#タグだとトピックタグ化されるため文字で明示する
 
@@ -168,6 +204,8 @@ class Config:
     buffer_api_key: str
     buffer_channel_id: str
     slots: tuple[tuple[int, int], ...]
+    engage_slots: tuple[tuple[int, int], ...]
+    niches: tuple[str, ...]
     lookahead_hours: int
     jitter_minutes: int
     max_scheduled: int
@@ -204,16 +242,30 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
     return value
 
 
-def _parse_slots(raw: str) -> tuple[tuple[int, int], ...]:
+def _parse_slots(raw: str, *, allow_empty: bool = False) -> tuple[tuple[int, int], ...]:
     slots: list[tuple[int, int]] = []
     for token in (t.strip() for t in raw.split(",") if t.strip()):
         m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", token)
         if not m:
             raise ConfigError(f"POST_SLOTS_JST の形式が不正です(HH:MM): {token!r}")
         slots.append((int(m.group(1)), int(m.group(2))))
-    if not slots:
+    if not slots and not allow_empty:
         raise ConfigError("POST_SLOTS_JST が空です")
     return tuple(sorted(set(slots)))
+
+
+def _parse_engage_slots(raw: str) -> tuple[tuple[int, int], ...]:
+    if raw.lower() == "none":
+        return ()
+    return _parse_slots(raw, allow_empty=True)
+
+
+def _parse_niches(raw: str) -> tuple[str, ...]:
+    niches = tuple(n.strip() for n in raw.split(",") if n.strip())
+    unknown = [n for n in niches if n not in VALID_NICHES]
+    if unknown or not niches:
+        raise ConfigError(f"NICHES が不正です: {unknown or raw!r} (選択肢: {sorted(VALID_NICHES)})")
+    return niches
 
 
 def load_config() -> Config:
@@ -230,6 +282,8 @@ def load_config() -> Config:
         buffer_api_key=os.environ["BUFFER_API_KEY"].strip(),
         buffer_channel_id=os.environ.get("BUFFER_CHANNEL_ID", "").strip(),
         slots=_parse_slots(os.environ.get("POST_SLOTS_JST", "").strip() or "12:10,18:45,21:45"),
+        engage_slots=_parse_engage_slots(os.environ.get("ENGAGE_SLOTS_JST", "").strip() or "07:45"),
+        niches=_parse_niches(os.environ.get("NICHES", "").strip() or DEFAULT_NICHES),
         lookahead_hours=_env_int("LOOKAHEAD_HOURS", 48, minimum=1),
         jitter_minutes=_env_int("SLOT_JITTER_MINUTES", 8),
         max_scheduled=_env_int("MAX_SCHEDULED", 10, minimum=1),
@@ -262,6 +316,25 @@ def save_posted_ids(posted: set[str]) -> None:
     tmp = POSTED_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(sorted(posted), ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(POSTED_FILE)  # 書き込み途中で落ちてもファイルが壊れないようにする
+
+
+RECENT_FILE = POSTED_FILE.with_name("recent_templates.json")
+
+
+def load_recent_templates() -> list[str]:
+    """直近に使ったテンプレートのキー。壊れていても致命的ではないので空で続行する。"""
+    try:
+        data = json.loads(RECENT_FILE.read_text(encoding="utf-8"))
+        return [str(k) for k in data][-RECENT_KEEP:]
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+
+
+def save_recent_templates(recent: list[str]) -> None:
+    RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RECENT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(recent[-RECENT_KEEP:], ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(RECENT_FILE)
 
 
 # ----------------------------- 楽天API ---------------------------------------
@@ -339,37 +412,39 @@ def pick_best(items: list[Item], excluded: set[str], cfg: Config) -> Item | None
     return None
 
 
-def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str]]:
-    """(キーワード, カテゴリ) のリスト。季節ものを2重に入れて当たりやすくする。"""
+def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str, str]]:
+    """(検索キーワード, 表示名, カテゴリ) のリスト。季節ものは2重に入れて当たりやすくする。"""
     if cfg.manual_keyword:
-        return [(cfg.manual_keyword, "general")]
+        return [(cfg.manual_keyword, cfg.manual_keyword, "general")]
     if cfg.custom_keywords:
-        return [(k, "general") for k in cfg.custom_keywords]
-    pool = [(k, "seasonal") for k in SEASONAL_KEYWORDS[now.month]] * 2
-    for category, words in EVERGREEN_KEYWORDS.items():
-        pool += [(w, category) for w in words]
+        return [(k, k, "general") for k in cfg.custom_keywords]
+    pool: list[tuple[str, str, str]] = []
+    for niche in cfg.niches:
+        pairs = SEASONAL_KEYWORDS[now.month] * 2 if niche == "seasonal" else NICHE_KEYWORDS[niche]
+        pool += [(q, name, niche) for q, name in pairs]
     return pool
 
 
-def select_item(pool: list[tuple[str, str]], excluded: set[str], cfg: Config) -> tuple[Item, str] | None:
+def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config) -> tuple[Item, str, str] | None:
+    """(商品, 表示名, カテゴリ) を返す。見つからなければ None。"""
     tried: set[str] = set()
     candidates = pool[:]
     random.shuffle(candidates)
-    for keyword, category in candidates:
-        if keyword in tried:
+    for query, name, category in candidates:
+        if query in tried:
             continue
         if len(tried) >= MAX_KEYWORD_TRIES:
             break
-        tried.add(keyword)
+        tried.add(query)
         try:
-            items = fetch_items(keyword, cfg)
+            items = fetch_items(query, cfg)
         except RakutenError as exc:
             print(f"[警告] 楽天API取得失敗: {exc}", file=sys.stderr)
             continue
         item = pick_best(items, excluded, cfg)
         if item:
-            print(f"選定: keyword={keyword!r} / {item.name[:40]}")
-            return item, category
+            print(f"選定: keyword={query!r} / {item.name[:40]}")
+            return item, name, category
         time.sleep(0.5)  # 楽天APIへの連続アクセスを避ける
     return None
 
@@ -393,35 +468,66 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def build_thread(item: Item, category: str, used_hooks: set[str]) -> tuple[str, str]:
-    """(本文, リプライ) を返す。本文はリンクなしの短い固定コメント。"""
-    candidates = HOOKS.get(category, []) + HOOKS["general"]
-    fresh = [h for h in candidates if h not in used_hooks] or candidates  # 同一実行内の重複を避ける
-    hook = random.choice(fresh)
-    used_hooks.add(hook)
+def _pick_fresh(candidates: list[tuple[str, str]], recent: list[str]) -> tuple[str, str]:
+    """
+    (key, text) の候補から、直近に使っていないものをランダムに選ぶ。
+    除外する履歴は「候補数-1」件までに絞る。履歴が候補数より長いと全候補が除外されて
+    同じ文面が連続し得るため、この幅なら最低1件は必ず残る。
+    """
+    window = recent[-(len(candidates) - 1):] if len(candidates) > 1 else []
+    fresh = [c for c in candidates if c[0] not in window]
+    return random.choice(fresh)
 
-    name = _truncate(clean_item_name(item.name), 26)
+
+def sanitize_topic(raw: str) -> str | None:
+    """Threadsのトピックタグ規則(ピリオド・&不可、50字以内)に合わせる。"""
+    topic = re.sub(r"[.&#＃]", "", raw).strip()
+    return topic[:50] or None
+
+
+def build_thread(item: Item, name: str, category: str, recent: list[str]) -> tuple[str, str, str | None, str]:
+    """(本文, リプライ, トピック, テンプレートキー) を返す。本文はリンクなしの質問。"""
+    cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
+    candidates = [(f"{c}:{i}", t) for c in cats for i, t in enumerate(TEMPLATES[c])]
+    key, template = _pick_fresh(candidates, recent)
+    main_text = template.format(n=name)
+
+    short_name = _truncate(clean_item_name(item.name), 26)
     detail = f"{item.price:,}円"
     if item.review_avg is not None and item.review_count is not None:
         detail = f"★{item.review_avg:.1f}({item.review_count:,}件) / {detail}"
+    reply = f"参考までに👇\n{PR_LABEL}{short_name}\n{detail}\n{item.url}"
 
-    reply = f"{PR_LABEL}{name}\n{detail}\n{item.url}"
-    return _truncate(hook, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX)
+    topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
+    return _truncate(main_text, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX), topic, key
+
+
+def build_engagement_post(recent: list[str]) -> tuple[str, str]:
+    """商品なしの質問のみ投稿。(本文, テンプレートキー)"""
+    key, text = _pick_fresh([(f"q:{i}", t) for i, t in enumerate(ENGAGEMENT_QUESTIONS)], recent)
+    return _truncate(text, THREADS_TEXT_MAX), key
 
 
 # ----------------------------- 投稿枠 ----------------------------------------
-def build_slots(now: datetime, cfg: Config) -> list[datetime]:
+@dataclass(frozen=True)
+class Slot:
+    at: datetime
+    kind: str  # "product"(商品+リプライ) or "engage"(質問のみ)
+
+
+def build_slots(now: datetime, cfg: Config) -> list[Slot]:
     """now〜now+LOOKAHEAD の範囲にある、JSTの基準時刻の枠を昇順で返す。"""
     earliest = now + timedelta(minutes=MIN_LEAD_MINUTES)
     latest = now + timedelta(hours=cfg.lookahead_hours)
-    slots: list[datetime] = []
+    plan = [(h, m, "product") for h, m in cfg.slots] + [(h, m, "engage") for h, m in cfg.engage_slots]
+    slots: dict[datetime, Slot] = {}
     for day_offset in range(cfg.lookahead_hours // 24 + 2):
         day = (now + timedelta(days=day_offset)).date()
-        for hour, minute in cfg.slots:
-            slot = datetime.combine(day, dtime(hour, minute), tzinfo=JST)
-            if earliest <= slot <= latest:
-                slots.append(slot)
-    return sorted(slots)
+        for hour, minute, kind in plan:
+            at = datetime.combine(day, dtime(hour, minute), tzinfo=JST)
+            if earliest <= at <= latest:
+                slots.setdefault(at, Slot(at, kind))  # 同時刻が重複したら商品枠を優先(先に登録)
+    return sorted(slots.values(), key=lambda sl: sl.at)
 
 
 def slot_is_taken(slot: datetime, scheduled: list[datetime], cfg: Config) -> bool:
@@ -540,19 +646,24 @@ mutation CreatePost($input: CreatePostInput!) {
 """
 
 
-def schedule_thread(cfg: Config, channel_id: str, due: datetime, main_text: str, reply_text: str) -> str:
-    """本文+リプライのスレッドを予約する。成功したBufferのpost idを返す。"""
-    variables = {
-        "input": {
-            "channelId": channel_id,
-            "text": main_text,  # ドキュメント仕様: thread[0] と同じ内容にする
-            "schedulingType": "automatic",
-            "mode": "customScheduled",
-            "dueAt": due.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "metadata": {"threads": {"thread": [{"text": main_text}, {"text": reply_text}]}},
-        }
+def _create_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
+                 reply_text: str | None, topic: str | None) -> str:
+    threads_meta: dict[str, Any] = {}
+    if reply_text:
+        threads_meta["thread"] = [{"text": main_text}, {"text": reply_text}]  # 本文+リプライ
+    if topic:
+        threads_meta["topic"] = topic
+    post_input: dict[str, Any] = {
+        "channelId": channel_id,
+        "text": main_text,  # ドキュメント仕様: thread[0] と同じ内容にする
+        "schedulingType": "automatic",
+        "mode": "customScheduled",
+        "dueAt": due.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
     }
-    result = buffer_request(cfg, CREATE_POST_MUTATION, variables, is_write=True).get("createPost") or {}
+    if threads_meta:
+        post_input["metadata"] = {"threads": threads_meta}
+
+    result = buffer_request(cfg, CREATE_POST_MUTATION, {"input": post_input}, is_write=True).get("createPost") or {}
     post = result.get("post")
     if post:
         return post["id"]
@@ -560,6 +671,21 @@ def schedule_thread(cfg: Config, channel_id: str, due: datetime, main_text: str,
     if re.search(r"limit|上限|quota", message, re.IGNORECASE):
         raise BufferLimitReached(message)
     raise BufferError(f"{result.get('__typename')}: {message}")
+
+
+def schedule_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
+                  reply_text: str | None = None, topic: str | None = None) -> str:
+    """予約を作成し Buffer の post id を返す。トピックタグが原因で弾かれた場合のみ、タグ無しで再試行する。"""
+    try:
+        return _create_post(cfg, channel_id, due, main_text, reply_text, topic)
+    except BufferLimitReached:
+        raise
+    except BufferError as exc:
+        # バリデーションエラー(=未登録)の場合のみ安全に再送できる
+        if topic and re.search(r"topic", str(exc), re.IGNORECASE):
+            print(f"[警告] トピックタグ({topic})が受け付けられないため、タグ無しで再試行します: {exc}", file=sys.stderr)
+            return _create_post(cfg, channel_id, due, main_text, reply_text, None)
+        raise
 
 
 # ----------------------------- メイン ----------------------------------------
@@ -570,10 +696,11 @@ def main() -> int:
     except ConfigError as exc:
         print(f"[設定エラー] {exc}", file=sys.stderr)
         return 1
+    recent = load_recent_templates()
 
     now = datetime.now(JST)
     slots = build_slots(now, cfg)
-    print(f"現在(JST): {now:%Y-%m-%d %H:%M} / 対象枠: {len(slots)}件 / DRY_RUN={cfg.dry_run}")
+    print(f"現在(JST): {now:%Y-%m-%d %H:%M} / 対象枠: {len(slots)}件 / ジャンル: {','.join(cfg.niches)} / DRY_RUN={cfg.dry_run}")
 
     try:
         org_id, channel_id = resolve_channel(cfg)
@@ -582,7 +709,7 @@ def main() -> int:
         print(f"[Bufferエラー] {exc}", file=sys.stderr)
         return 1
 
-    open_slots = [s for s in slots if not slot_is_taken(s, scheduled, cfg)]
+    open_slots = [sl for sl in slots if not slot_is_taken(sl.at, scheduled, cfg)]
     capacity = max(cfg.max_scheduled - len(scheduled), 0)
     print(f"予約済み: {len(scheduled)}件 / 空き枠: {len(open_slots)}件 / 追加可能: {capacity}件")
     open_slots = open_slots[:capacity]
@@ -591,39 +718,53 @@ def main() -> int:
         return 0
 
     pool = build_keyword_pool(cfg, now)
-    used_hooks: set[str] = set()
     chosen_now: set[str] = set()
     failures = 0
 
     for slot in open_slots:
-        picked = select_item(pool, posted | chosen_now, cfg)
-        if not picked:
-            print(f"[警告] {slot:%m/%d %H:%M} に使える商品が見つかりませんでした", file=sys.stderr)
-            failures += 1
-            continue
-        item, category = picked
-        main_text, reply_text = build_thread(item, category, used_hooks)
-        due = slot + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
+        item: Item | None = None
+        reply_text: str | None = None
+        if slot.kind == "engage":
+            main_text, key = build_engagement_post(recent)
+            topic: str | None = ENGAGEMENT_TOPIC
+        else:
+            picked = select_item(pool, posted | chosen_now, cfg)
+            if not picked:
+                print(f"[警告] {slot.at:%m/%d %H:%M} に使える商品が見つかりませんでした", file=sys.stderr)
+                failures += 1
+                continue
+            item, name, category = picked
+            main_text, reply_text, topic, key = build_thread(item, name, category, recent)
 
-        print(f"--- {due:%Y-%m-%d %H:%M} JST ---\n{main_text}\n(リプライ)\n{reply_text}\n")
-        if cfg.dry_run:
+        due = slot.at + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
+        print(f"--- {due:%Y-%m-%d %H:%M} JST [{slot.kind}] topic={topic} ---\n{main_text}")
+        if reply_text:
+            print(f"(リプライ)\n{reply_text}")
+        print()
+
+        if item:
             chosen_now.add(item.code)
+        recent.append(key)
+        if cfg.dry_run:
             continue
 
         try:
-            post_id = schedule_thread(cfg, channel_id, due, main_text, reply_text)
+            post_id = schedule_post(cfg, channel_id, due, main_text, reply_text, topic)
         except BufferLimitReached as exc:
             print(f"[Buffer上限] 予約上限に達したため終了します: {exc}", file=sys.stderr)
             break
         except BufferError as exc:
             print(f"[予約失敗] {due:%m/%d %H:%M}: {exc}", file=sys.stderr)
+            recent.remove(key)
+            chosen_now.discard(item.code) if item else None
             failures += 1
             continue
 
         print(f"予約成功: bufferPostId={post_id}")
-        posted.add(item.code)
-        chosen_now.add(item.code)
-        save_posted_ids(posted)  # 途中で落ちても成功分は失わない
+        if item:
+            posted.add(item.code)
+            save_posted_ids(posted)  # 途中で落ちても成功分は失わない
+        save_recent_templates(recent)
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
     return 1 if failures else 0
