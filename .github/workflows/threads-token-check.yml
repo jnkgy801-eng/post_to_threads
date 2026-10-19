@@ -1,0 +1,60 @@
+name: Threads token check
+
+# 手動実行のみ。登録済みの THREADS_ACCESS_TOKEN で
+#   1) 自分の投稿一覧が取れるか(トークンが有効か)
+#   2) 投稿ごとのインサイト(閲覧数・いいね・返信など)が取れるか(権限があるか)
+# を確認する。トークンの値は出力しない(GitHubがログ上でも自動でマスクする)。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check Threads token and insights permission
+        env:
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.parse, urllib.request, urllib.error
+
+          token = os.environ.get("THREADS_ACCESS_TOKEN", "")
+          if not token:
+              sys.exit("NG: THREADS_ACCESS_TOKEN が未設定です")
+
+          def get(path, **params):
+              params["access_token"] = token
+              url = f"https://graph.threads.net/v1.0/{path}?" + urllib.parse.urlencode(params)
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      return r.status, json.load(r)
+              except urllib.error.HTTPError as e:
+                  try:
+                      return e.code, json.load(e)
+                  except ValueError:
+                      return e.code, {"error": {"message": "JSONではない応答"}}
+
+          status, data = get("me/threads", fields="id,timestamp", limit=3)
+          if status != 200 or "data" not in data:
+              err = data.get("error", {})
+              print(f"NG(1/2): 投稿一覧を取得できません HTTP {status} / {err.get('type')} / {err.get('message')}")
+              print("→ トークンが無効・期限切れ、または別種のトークン(Facebook用など)の可能性があります")
+              sys.exit(1)
+          posts = data["data"]
+          print(f"OK(1/2): トークンは有効です(取得できた投稿: {len(posts)}件)")
+          if not posts:
+              sys.exit("確認不可(2/2): 投稿が0件のためインサイトを試せません")
+
+          status, ins = get(f"{posts[0]['id']}/insights", metric="views,likes,replies,reposts,quotes")
+          if status != 200 or "data" not in ins:
+              err = ins.get("error", {})
+              print(f"NG(2/2): インサイトを取得できません HTTP {status} / {err.get('type')} / {err.get('message')}")
+              print("→ threads_manage_insights 権限を付けてトークンを再発行してください")
+              sys.exit(1)
+          values = {m["name"]: (m.get("values") or [{}])[0].get("value") for m in ins["data"]}
+          print(f"OK(2/2): インサイトを取得できました: {values}")
+          PY
