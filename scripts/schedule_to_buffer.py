@@ -28,6 +28,7 @@
   RAKUTEN_KEYWORD           手動指定キーワード(最優先)
   RAKUTEN_KEYWORDS          カンマ区切りの候補(未指定なら内蔵の季節+定番プール)
   DRY_RUN                   true なら Buffer に送らず内容だけ表示
+  USE_FEEDBACK              false なら分析結果(data/feedback.json)を使わない 既定: true
 """
 
 from __future__ import annotations
@@ -214,6 +215,7 @@ class Config:
     manual_keyword: str
     custom_keywords: tuple[str, ...]
     dry_run: bool
+    use_feedback: bool = True
 
 
 @dataclass(frozen=True)
@@ -295,6 +297,7 @@ def load_config() -> Config:
             k.strip() for k in os.environ.get("RAKUTEN_KEYWORDS", "").split(",") if k.strip()
         ),
         dry_run=os.environ.get("DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
+        use_feedback=os.environ.get("USE_FEEDBACK", "").strip().lower() not in {"0", "false", "no"},
     )
     if cfg.min_price > cfg.max_price:
         raise ConfigError("MIN_PRICE が MAX_PRICE を超えています")
@@ -339,6 +342,34 @@ def save_recent_templates(recent: list[str]) -> None:
 
 
 POST_LOG_FILE = POSTED_FILE.with_name("post_log.jsonl")
+FEEDBACK_FILE = POSTED_FILE.with_name("feedback.json")
+FEEDBACK_KEYS = ("template_weights", "category_weights", "keyword_weights")
+WEIGHT_MIN, WEIGHT_MAX = 0.25, 4.0  # ファイルが壊れていても極端な偏りにならないよう読み込み側でも制限する
+
+
+def load_feedback() -> dict[str, dict[str, float]]:
+    """
+    scripts/analyze_threads.py が作る重みを読む。
+    無い・壊れている・データ不足(active=false)の場合は空 = 従来どおりの完全ランダムで動く。
+    """
+    try:
+        data = json.loads(FEEDBACK_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or not data.get("active"):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for name in FEEDBACK_KEYS:
+        raw = data.get(name)
+        if not isinstance(raw, dict):
+            continue
+        out[name] = {
+            str(k): min(WEIGHT_MAX, max(WEIGHT_MIN, float(v)))
+            for k, v in raw.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        }
+    return out
+
 
 
 def append_post_log(entry: dict[str, Any]) -> None:
@@ -371,7 +402,6 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "category": category,
         "keyword": keyword,
         "display_name": name,
-        "threads_media_id": None,  # 分析スクリプトが後から埋める
     }
     if item:
         entry.update(
@@ -476,11 +506,29 @@ def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str, str]]
     return pool
 
 
-def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config) -> tuple[Item, str, str, str] | None:
+def ordered_candidates(pool: list[tuple[str, str, str]],
+                       feedback: dict[str, dict[str, float]] | None) -> list[tuple[str, str, str]]:
+    """候補を試す順序を決める。分析結果があれば、反応の良いカテゴリ・キーワードが先頭に来やすい重み付きシャッフル。"""
+    if not feedback:
+        shuffled = pool[:]
+        random.shuffle(shuffled)
+        return shuffled
+    cat_w = feedback.get("category_weights", {})
+    kw_w = feedback.get("keyword_weights", {})
+
+    def sort_key(entry: tuple[str, str, str]) -> float:
+        query, _name, category = entry
+        weight = cat_w.get(category, 1.0) * kw_w.get(query, 1.0)
+        return random.random() ** (1.0 / weight)  # 重み付きランダム順序(Efraimidis-Spirakis法)
+
+    return sorted(pool, key=sort_key, reverse=True)
+
+
+def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config,
+                feedback: dict[str, dict[str, float]] | None = None) -> tuple[Item, str, str, str] | None:
     """(商品, 表示名, カテゴリ, 検索キーワード) を返す。見つからなければ None。"""
     tried: set[str] = set()
-    candidates = pool[:]
-    random.shuffle(candidates)
+    candidates = ordered_candidates(pool, feedback)
     for query, name, category in candidates:
         if query in tried:
             continue
@@ -519,7 +567,8 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _pick_fresh(candidates: list[tuple[str, str]], recent: list[str]) -> tuple[str, str]:
+def _pick_fresh(candidates: list[tuple[str, str]], recent: list[str],
+                weights: dict[str, float] | None = None) -> tuple[str, str]:
     """
     (key, text) の候補から、直近に使っていないものをランダムに選ぶ。
     除外する履歴は「候補数-1」件までに絞る。履歴が候補数より長いと全候補が除外されて
@@ -527,6 +576,8 @@ def _pick_fresh(candidates: list[tuple[str, str]], recent: list[str]) -> tuple[s
     """
     window = recent[-(len(candidates) - 1):] if len(candidates) > 1 else []
     fresh = [c for c in candidates if c[0] not in window]
+    if weights:  # 分析結果があれば、反応の良いテンプレートが出やすい重み付き抽選(重みの無いものは1.0)
+        return random.choices(fresh, weights=[weights.get(c[0], 1.0) for c in fresh], k=1)[0]
     return random.choice(fresh)
 
 
@@ -536,11 +587,12 @@ def sanitize_topic(raw: str) -> str | None:
     return topic[:50] or None
 
 
-def build_thread(item: Item, name: str, category: str, recent: list[str]) -> tuple[str, str, str | None, str]:
+def build_thread(item: Item, name: str, category: str, recent: list[str],
+                 template_weights: dict[str, float] | None = None) -> tuple[str, str, str | None, str]:
     """(本文, リプライ, トピック, テンプレートキー) を返す。本文はリンクなしの質問。"""
     cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
     candidates = [(f"{c}:{i}", t) for c in cats for i, t in enumerate(TEMPLATES[c])]
-    key, template = _pick_fresh(candidates, recent)
+    key, template = _pick_fresh(candidates, recent, template_weights)
     main_text = template.format(n=name)
 
     short_name = _truncate(clean_item_name(item.name), 26)
@@ -553,9 +605,9 @@ def build_thread(item: Item, name: str, category: str, recent: list[str]) -> tup
     return _truncate(main_text, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX), topic, key
 
 
-def build_engagement_post(recent: list[str]) -> tuple[str, str]:
+def build_engagement_post(recent: list[str], template_weights: dict[str, float] | None = None) -> tuple[str, str]:
     """商品なしの質問のみ投稿。(本文, テンプレートキー)"""
-    key, text = _pick_fresh([(f"q:{i}", t) for i, t in enumerate(ENGAGEMENT_QUESTIONS)], recent)
+    key, text = _pick_fresh([(f"q:{i}", t) for i, t in enumerate(ENGAGEMENT_QUESTIONS)], recent, template_weights)
     return _truncate(text, THREADS_TEXT_MAX), key
 
 
@@ -748,6 +800,12 @@ def main() -> int:
         print(f"[設定エラー] {exc}", file=sys.stderr)
         return 1
     recent = load_recent_templates()
+    feedback = load_feedback() if cfg.use_feedback else {}
+    if feedback:
+        print("分析フィードバック: 有効(" + " / ".join(f"{k.removesuffix('_weights')}={len(v)}件" for k, v in feedback.items()) + ")")
+    else:
+        print("分析フィードバック: なし(データ不足 または 無効)→ 完全ランダムで選定")
+    template_weights = feedback.get("template_weights")
 
     now = datetime.now(JST)
     slots = build_slots(now, cfg)
@@ -779,16 +837,16 @@ def main() -> int:
         category: str | None = None
         keyword: str | None = None
         if slot.kind == "engage":
-            main_text, key = build_engagement_post(recent)
+            main_text, key = build_engagement_post(recent, template_weights)
             topic: str | None = ENGAGEMENT_TOPIC
         else:
-            picked = select_item(pool, posted | chosen_now, cfg)
+            picked = select_item(pool, posted | chosen_now, cfg, feedback)
             if not picked:
                 print(f"[警告] {slot.at:%m/%d %H:%M} に使える商品が見つかりませんでした", file=sys.stderr)
                 failures += 1
                 continue
             item, name, category, keyword = picked
-            main_text, reply_text, topic, key = build_thread(item, name, category, recent)
+            main_text, reply_text, topic, key = build_thread(item, name, category, recent, template_weights)
 
         due = slot.at + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
         print(f"--- {due:%Y-%m-%d %H:%M} JST [{slot.kind}] topic={topic} ---\n{main_text}")
