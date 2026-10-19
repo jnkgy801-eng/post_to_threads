@@ -32,7 +32,8 @@ Application ID・Access Key・アフィリエイトIDを取得(従来どおり)�
 2. https://publish.buffer.com/settings/api で **APIキー**を発行
 3. 無料プランは「1チャンネルあたり予約10件まで」。本スクリプトは予約済み件数を見て上限を超えないようにします
 
-※ BufferがThreadsとの連携を保持するため、**Threads側の長期アクセストークン(60日で失効)の更新運用は不要**になります。
+※ 投稿そのものはBufferがThreadsとの連携を保持して行うため、**投稿にはThreads側のトークンは不要**です。
+ただし、投稿の閲覧数・返信数などの**分析(インサイト取得)にはThreads APIのトークンを使います**(下記Secrets参照)。
 
 ### 3. GitHub Secrets
 | Secret名 | 内容 |
@@ -43,12 +44,28 @@ Application ID・Access Key・アフィリエイトIDを取得(従来どおり)�
 | `BUFFER_API_KEY` | Buffer APIキー |
 | `BUFFER_CHANNEL_ID` | (任意)Threadsチャンネルが複数ある場合のみ |
 | `RAKUTEN_KEYWORDS` | (任意)カンマ区切りで検索キーワードを固定したい場合 |
+| `THREADS_ACCESS_TOKEN` | (分析用)Threads APIのトークン。`threads_basic` と `threads_manage_insights` 権限が必要。長期トークンは約60日で失効するため更新が必要 |
+| `THREADS_USER_ID` | (分析用)ThreadsのユーザーID |
 
-不要になったSecrets: `THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` / `GEMINI_API_KEY` / `RAKUTEN_GENRE_ID`
+不要になったSecrets: `GEMINI_API_KEY` / `RAKUTEN_GENRE_ID`
+(`THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` は分析用に使うため**削除しないでください**)
 
 ### 4. 動作確認(必ず先にドライラン)
 Actionsタブ → `Schedule Rakuten posts to Buffer (Threads)` → `Run workflow` → `dry_run` を **true** のまま実行。
 ログに予約予定の内容が出力されます(Bufferには送信されません)。問題なければ `dry_run` を **false** で実行してください。
+
+### 5. Threadsトークンの確認(分析を始める前に1回)
+Actionsタブ → `Threads token check` → `Run workflow`。
+`OK(1/2)` はトークンが有効、`OK(2/2)` はインサイト取得の権限もあることを表します。
+`NG(2/2)` の場合は、Metaアプリの「Threads APIへのアクセス」ユースケースで `threads_manage_insights` を追加し、
+**Threads API用の**ユーザートークン生成ツールでトークンを再発行して、`THREADS_ACCESS_TOKEN` を更新してください。
+(Graph APIエクスプローラ(Facebook用)で発行したトークンは、Threads APIでは使えません)
+
+## 投稿ログ(分析用)
+予約に成功するたびに `data/post_log.jsonl` へ1行ずつ追記します(ワークフローが `data/` ごと自動コミット)。
+カテゴリ・テンプレート・検索キーワード・商品・ショップ名・価格・レビュー・予約時刻などを記録し、
+後でThreadsのインサイトや楽天アフィリエイトのレポート(ショップ別)と突き合わせるための元データです。
+`threads_media_id` は分析スクリプトが後から埋めます。
 
 ## 運用上の注意
 - `data/posted.json` に予約済みの商品コードを記録し、重複を防ぎます(ワークフローが自動コミット)。
