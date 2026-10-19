@@ -226,6 +226,7 @@ class Item:
     review_avg: float | None
     review_count: int | None
     postage_free: bool
+    shop_name: str = ""
 
 
 # ----------------------------- 設定 ------------------------------------------
@@ -337,6 +338,55 @@ def save_recent_templates(recent: list[str]) -> None:
     tmp.replace(RECENT_FILE)
 
 
+POST_LOG_FILE = POSTED_FILE.with_name("post_log.jsonl")
+
+
+def append_post_log(entry: dict[str, Any]) -> None:
+    """
+    予約成功ごとに1行(JSON Lines)追記する。後で Threads のインサイトや楽天レポートと突き合わせる元データ。
+    ログの失敗で本処理(予約)を止めたくないので、書き込みエラーは警告だけ出して続行する。
+    """
+    try:
+        POST_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with POST_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"[警告] 投稿ログを書き込めませんでした: {exc}", file=sys.stderr)
+
+
+def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: str | None,
+                   main_text: str, reply_text: str | None, item: Item | None,
+                   name: str | None, category: str | None, keyword: str | None) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
+        "buffer_post_id": post_id,
+        "due_at": due.isoformat(timespec="seconds"),  # 予約時刻(JST)。Threads側の投稿との突き合わせに使う
+        "hour_jst": due.hour,
+        "weekday": due.weekday(),  # 0=月 ... 6=日
+        "kind": kind,  # product / engage
+        "template_key": key,
+        "topic": topic,
+        "main_text": main_text,
+        "reply_text": reply_text,
+        "category": category,
+        "keyword": keyword,
+        "display_name": name,
+        "threads_media_id": None,  # 分析スクリプトが後から埋める
+    }
+    if item:
+        entry.update(
+            item_code=item.code,
+            shop_code=item.shop_code,
+            shop_name=item.shop_name,
+            item_name=item.name,
+            price=item.price,
+            review_avg=item.review_avg,
+            review_count=item.review_count,
+            postage_free=item.postage_free,
+        )
+    return entry
+
+
 # ----------------------------- 楽天API ---------------------------------------
 def fetch_items(keyword: str, cfg: Config) -> list[Item]:
     params = {
@@ -379,6 +429,7 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
                     review_avg=float(raw["reviewAverage"]) if raw.get("reviewAverage") not in (None, "") else None,
                     review_count=int(raw["reviewCount"]) if raw.get("reviewCount") not in (None, "") else None,
                     postage_free=raw.get("postageFlag") == 0,
+                    shop_name=str(raw.get("shopName") or ""),
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -425,8 +476,8 @@ def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str, str]]
     return pool
 
 
-def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config) -> tuple[Item, str, str] | None:
-    """(商品, 表示名, カテゴリ) を返す。見つからなければ None。"""
+def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config) -> tuple[Item, str, str, str] | None:
+    """(商品, 表示名, カテゴリ, 検索キーワード) を返す。見つからなければ None。"""
     tried: set[str] = set()
     candidates = pool[:]
     random.shuffle(candidates)
@@ -444,7 +495,7 @@ def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Confi
         item = pick_best(items, excluded, cfg)
         if item:
             print(f"選定: keyword={query!r} / {item.name[:40]}")
-            return item, name, category
+            return item, name, category, query
         time.sleep(0.5)  # 楽天APIへの連続アクセスを避ける
     return None
 
@@ -724,6 +775,9 @@ def main() -> int:
     for slot in open_slots:
         item: Item | None = None
         reply_text: str | None = None
+        name: str | None = None
+        category: str | None = None
+        keyword: str | None = None
         if slot.kind == "engage":
             main_text, key = build_engagement_post(recent)
             topic: str | None = ENGAGEMENT_TOPIC
@@ -733,7 +787,7 @@ def main() -> int:
                 print(f"[警告] {slot.at:%m/%d %H:%M} に使える商品が見つかりませんでした", file=sys.stderr)
                 failures += 1
                 continue
-            item, name, category = picked
+            item, name, category, keyword = picked
             main_text, reply_text, topic, key = build_thread(item, name, category, recent)
 
         due = slot.at + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
@@ -765,6 +819,11 @@ def main() -> int:
             posted.add(item.code)
             save_posted_ids(posted)  # 途中で落ちても成功分は失わない
         save_recent_templates(recent)
+        append_post_log(make_log_entry(
+            post_id=post_id, due=due, kind=slot.kind, key=key, topic=topic,
+            main_text=main_text, reply_text=reply_text, item=item,
+            name=name, category=category, keyword=keyword,
+        ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
     return 1 if failures else 0
