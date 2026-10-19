@@ -1,0 +1,48 @@
+name: Analyze Threads insights
+
+# 1日1回、Threadsのインサイトを取得して data/ の分析結果(threads_metrics.json / feedback.json / threads_report.md)を更新する。
+# JST 05:00 = UTC 20:00(前日)。06:00(UTC 21:00)の予約ワークフローが、最新の重みを使えるよう1時間前に実行する。
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 予約ワークフローと同じグループにして、dataのコミット(push)が競合しないよう直列化する
+concurrency:
+  group: buffer-schedule
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Analyze Threads insights
+        env:
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          # --- 任意の調整(変えたい場合のみコメントを外す) ---
+          # MIN_POSTS: "15"      # 重みを出すのに必要な件数(商品/質問のみ それぞれ)
+          # MIN_AGE_HOURS: "24"  # 投稿から何時間たった投稿を集計するか
+        run: python scripts/analyze_threads.py
+
+      - name: Commit analysis results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          git diff --staged --quiet || git commit -m "chore: update threads analysis"
+          git push

@@ -61,6 +61,8 @@ jobs:
           # ENGAGE_SLOTS_JST: "07:45"
           # 扱うジャンル。増やすほどアカウントのテーマが散るので、まずは暮らし系に絞るのを推奨
           # NICHES: "storage,clean,home,seasonal"   # 他: beauty,gadget,food
+          # 分析結果(data/feedback.json)を投稿選定に使うか。既定は使う(データ不足の間は自動で完全ランダム)
+          # USE_FEEDBACK: "false"   # 使わない場合のみ
         run: python scripts/schedule_to_buffer.py
 
       # 失敗した回でも、成功分の posted.json は必ず保存する(次回の重複投稿防止)
