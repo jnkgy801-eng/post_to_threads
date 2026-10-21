@@ -1,12 +1,56 @@
 {
   "6ad6afc5b81183413da44359": {
-    "fetched_at": "2026-10-20T23:02:56+00:00",
+    "fetched_at": "2026-10-21T23:06:01+00:00",
     "likes": 1,
     "media_id": "18013445930764758",
     "permalink": "https://www.threads.com/@kennnosuke815/post/Deu8PvHEddO",
     "posted_at": "2026-10-20T22:48:05+00:00",
     "quotes": 0,
+    "replies": 2,
+    "reposts": 0,
+    "views": 316
+  },
+  "6ad6afc82d48e20f64bca426": {
+    "fetched_at": "2026-10-21T23:06:01+00:00",
+    "likes": 0,
+    "media_id": "18129165334838862",
+    "permalink": "https://www.threads.com/@kennnosuke815/post/Devar3llyJe",
+    "posted_at": "2026-10-21T03:14:04+00:00",
+    "quotes": 0,
     "replies": 1,
+    "reposts": 0,
+    "views": 110
+  },
+  "6ad6afcab81183413da44416": {
+    "fetched_at": "2026-10-21T23:06:01+00:00",
+    "likes": 0,
+    "media_id": "18117261476325933",
+    "permalink": "https://www.threads.com/@kennnosuke815/post/DewHc-noMRk",
+    "posted_at": "2026-10-21T09:45:15+00:00",
+    "quotes": 0,
+    "replies": 1,
+    "reposts": 0,
+    "views": 2
+  },
+  "6ad6afcd2fcafd0f184134ff": {
+    "fetched_at": "2026-10-21T23:06:01+00:00",
+    "likes": 0,
+    "media_id": "18166294630437241",
+    "permalink": "https://www.threads.com/@kennnosuke815/post/DewcYbwlA2N",
+    "posted_at": "2026-10-21T12:48:06+00:00",
+    "quotes": 0,
+    "replies": 1,
+    "reposts": 0,
+    "views": 102
+  },
+  "6ad6afcee9c669def5dfd8a8": {
+    "fetched_at": "2026-10-21T23:06:01+00:00",
+    "likes": 0,
+    "media_id": "17912926809494438",
+    "permalink": "https://www.threads.com/@kennnosuke815/post/Dexhf47Gq09",
+    "posted_at": "2026-10-21T22:52:05+00:00",
+    "quotes": 0,
+    "replies": 0,
     "reposts": 0,
     "views": 0
   }
