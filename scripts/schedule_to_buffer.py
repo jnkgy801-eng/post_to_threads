@@ -19,12 +19,12 @@
   BUFFER_CHANNEL_ID         Threads チャンネルID(未指定ならThreadsチャンネルを自動検出)
   POST_SLOTS_JST            商品投稿の時刻(JST, カンマ区切り) 既定: 12:10,18:45,21:45
   ENGAGE_SLOTS_JST          質問のみ投稿の時刻(JST)   既定: 07:45 (none で無効化)
-  NICHES                    扱うジャンル(カンマ区切り) 既定: storage,clean,home,seasonal
-                            選択肢: storage clean home seasonal beauty gadget food
+  NICHES                    扱うジャンル(カンマ区切り) 既定: daily,seasonal,home
+                            選択肢: daily storage clean home seasonal beauty gadget food
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
   SLOT_JITTER_MINUTES       各枠に足すランダム分数        既定: 8
   MAX_SCHEDULED             予約の上限(無料プランは10)    既定: 10
-  MIN_PRICE / MAX_PRICE     価格帯フィルタ(円)           既定: 500 / 8000
+  MIN_PRICE / MAX_PRICE     価格帯フィルタ(円)           既定: 2000 / 12000(報酬額が小さい低単価を避ける)
   RAKUTEN_KEYWORD           手動指定キーワード(最優先)
   RAKUTEN_KEYWORDS          カンマ区切りの候補(未指定なら内蔵の季節+定番プール)
   DRY_RUN                   true なら Buffer に送らず内容だけ表示
@@ -73,6 +73,9 @@ def _p(query: str, name: str | None = None) -> Pair:
 
 
 NICHE_KEYWORDS: dict[str, list[Pair]] = {
+    # 分析結果(2026-10〜11): 日用消耗品は「誰でも意見がある」ため返信・閲覧が伸び、リピート購入で成果にもつながる。
+    "daily": [_p("洗濯洗剤"), _p("トイレットペーパー"), _p("ドリップコーヒー"), _p("ティッシュ ボックス", "ティッシュ"),
+              _p("柔軟剤"), _p("食器用洗剤"), _p("炭酸水")],
     "storage": [_p("収納ケース"), _p("隙間 収納", "隙間収納"), _p("ケーブル 収納", "ケーブル収納"),
                 _p("キッチン 収納", "キッチン収納"), _p("衣類 収納", "衣類収納")],
     "clean": [_p("掃除 ブラシ", "掃除グッズ"), _p("洗濯洗剤"), _p("時短 便利グッズ", "時短グッズ"),
@@ -81,15 +84,15 @@ NICHE_KEYWORDS: dict[str, list[Pair]] = {
              _p("着る毛布"), _p("快眠 枕", "枕")],
     # 以下は既定では使わない(NICHES で追加できる)
     "beauty": [_p("シートマスク"), _p("ヘアオイル"), _p("リップ 保湿", "リップ"), _p("ハンドクリーム"), _p("日焼け止め")],
-    "gadget": [_p("モバイルバッテリー 軽量", "モバイルバッテリー"), _p("ワイヤレスイヤホン"),
-               _p("スマホスタンド"), _p("USB 充電器", "充電器")],
+    # モバイルバッテリーは閲覧数が全体の1/4(幾何平均26)だったため除外
+    "gadget": [_p("ワイヤレスイヤホン"), _p("スマホスタンド"), _p("USB 充電器", "充電器")],
     "food": [_p("プロテイン"), _p("ドリップコーヒー"), _p("個包装 お菓子", "お菓子"), _p("インスタント スープ", "スープ")],
 }
 
 # 月(JST)ごとの季節キーワード(暮らし・家電・日用品に限定)。「今必要」な商品は反応を取りやすい。
 SEASONAL_KEYWORDS: dict[int, list[Pair]] = {
-    1: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("結露 対策", "結露対策"), _p("ロボット掃除機")],
-    2: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("花粉 対策", "花粉対策"), _p("ロボット掃除機")],
+    1: [_p("加湿器"), _p("電気毛布"), _p("セラミックヒーター"), _p("結露 対策", "結露対策"), _p("布団乾燥機")],
+    2: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("花粉 対策", "花粉対策"), _p("布団乾燥機")],
     3: [_p("花粉 対策", "花粉対策"), _p("空気清浄機"), _p("ロボット掃除機"), _p("洗濯洗剤"), _p("衣替え 収納", "衣替え収納")],
     4: [_p("ロボット掃除機"), _p("洗濯洗剤"), _p("衣替え 収納", "衣替え収納"), _p("除湿剤"), _p("掃除 ブラシ", "掃除グッズ")],
     5: [_p("除湿機"), _p("冷感タオル"), _p("ロボット掃除機"), _p("除湿剤"), _p("網戸 掃除", "網戸掃除")],
@@ -98,10 +101,10 @@ SEASONAL_KEYWORDS: dict[int, list[Pair]] = {
     8: [_p("携帯扇風機"), _p("冷感タオル"), _p("日傘"), _p("冷感 敷きパッド", "冷感敷きパッド"), _p("サーキュレーター")],
     9: [_p("空気清浄機"), _p("加湿器"), _p("ロボット掃除機"), _p("衣替え 収納", "衣替え収納"), _p("サーキュレーター")],
     10: [_p("加湿器"), _p("着る毛布"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ")],
-    11: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ"), _p("着る毛布")],
-    12: [_p("加湿器"), _p("電気毛布"), _p("こたつ"), _p("結露 対策", "結露対策"), _p("空気清浄機")],
+    11: [_p("電気毛布"), _p("こたつ"), _p("加湿器"), _p("セラミックヒーター"), _p("布団乾燥機")],
+    12: [_p("電気毛布"), _p("こたつ"), _p("セラミックヒーター"), _p("結露 対策", "結露対策"), _p("布団乾燥機")],
 }
-DEFAULT_NICHES = "storage,clean,home,seasonal"
+DEFAULT_NICHES = "daily,seasonal,home"
 VALID_NICHES = set(NICHE_KEYWORDS) | {"seasonal"}
 
 # 投稿対象から外す商品(規制商材・ふるさと納税・中古・予約など)
@@ -109,7 +112,8 @@ NG_NAME = re.compile(r"ふるさと納税|中古|医薬品|第[1-3]類|コンタ
 NG_SHOP = re.compile(r"^(f\d{6}-|book$)")  # 自治体(ふるさと納税)・書籍ショップ
 
 # レビュー条件(厳しい順)。上から順に満たす商品を探し、無ければ緩める。
-REVIEW_TIERS: tuple[tuple[float, int], ...] = ((4.3, 100), (4.0, 30))
+REVIEW_TIERS: tuple[tuple[float, int], ...] = ((4.5, 200), (4.3, 100), (4.0, 30))
+DEFAULT_AFFILIATE_RATE = 2.0  # APIが料率(%)を返さない場合の仮定値
 
 # ---------------------------------------------------------------------------
 # 投稿文テンプレート(手書き・AI不使用)。{n} に商品カテゴリ名が入る。
@@ -119,61 +123,74 @@ REVIEW_TIERS: tuple[tuple[float, int], ...] = ((4.3, 100), (4.0, 30))
 #   3) 2〜3行・50字前後。短すぎる一言は滞在時間も伸びない
 # 薬機法・景表法の観点から、効能の断定や「自分が使った」等の体験の偽装は入れない。
 # ---------------------------------------------------------------------------
-TEMPLATES: dict[str, list[str]] = {
+# 分析結果(閲覧数の幾何平均): 反応が良い型 = 「二択で好みを聞く」「失敗談」「こだわり」「金額の条件つき」。
+# 悪い型 = 「愛用品を教えて」「重視点の三択」「口コミは見る?」など、答えるのに手間がかかる/誰にも刺さらない質問。
+# IDは固定(既存のIDを振り直さない)。削除した文面のIDは欠番のまま残す。
+Tpl = tuple[int, str]
+TEMPLATES: dict[str, list[Tpl]] = {
     "general": [
-        "{n}を選ぶとき、一番重視するのはどれ？\n①価格 ②口コミ ③見た目\n番号で教えてください👇",
-        "{n}、リピ買いする派？\nそれとも毎回ちがうのを試す派？",
-        "{n}で「これだけは譲れない」ってポイント、ありますか？\nこだわりを聞きたいです👀",
-        "{n}、安いのと高いの、どっちを買う派？\n理由も知りたいです",
-        "{n}って、つい後回しにしがちじゃないですか？\nみなさんはどうしてますか？",
-        "{n}、今愛用しているものがあれば教えてください🙏\n参考にしたいです",
-        "{n}を買うとき、口コミは見ますか？\n①絶対見る ②たまに見る ③見ない",
-        "{n}で失敗したことある人、いますか？\nあるあるを聞きたい😂",
+        (2, "{n}で「これだけは譲れない」ってポイント、ありますか？\nこだわりを聞きたいです👀"),
+        (3, "{n}、安いのと高いの、どっちを買う派？\n理由も知りたいです"),
+        (4, "{n}って、つい後回しにしがちじゃないですか？\nみなさんはどうしてますか？"),
+        (7, "{n}で失敗したことある人、いますか？\nあるあるを聞きたい😂"),
+        # --- 以下、上位パターン(二択・失敗/後悔・金額条件)を踏まえた新規 ---
+        (8, "{n}って、結局いくらまでなら出せますか？\n①〜1,000円 ②〜3,000円 ③それ以上\n番号で教えてください👇"),
+        (9, "{n}で「もっと早く買えばよかった」って思ったこと、ありますか？\n後悔した人もぜひ😂"),
+        (10, "{n}、「これにして正解だった」って選び方、ありますか？\n選んだ理由も聞きたいです👀"),
+        (11, "{n}は\n①安いのを使い切る派 ②ちょっといいのを長く使う派\nどっちですか？"),
     ],
     "seasonal": [
-        "そろそろ{n}の季節ですね。\nもう準備しましたか？\n①もう買った ②これから ③毎年ギリギリ",
-        "{n}、毎年買い替える派？\nそれとも長く使う派？",
-        "{n}って、いつ頃から準備しますか？\n早め派？ギリギリ派？",
+        (0, "そろそろ{n}の季節ですね。\nもう準備しましたか？\n①もう買った ②これから ③毎年ギリギリ"),
+        (1, "{n}、毎年買い替える派？\nそれとも長く使う派？"),
+        (2, "{n}って、いつ頃から準備しますか？\n早め派？ギリギリ派？"),
+        (3, "この時期の{n}、みなさんはいくらくらいのを選びますか？\n①〜3,000円 ②〜6,000円 ③それ以上"),
     ],
     "storage": [
-        "{n}って、見せる派？隠す派？\nどっち派か教えてください👇",
-        "{n}、買ったのに使いこなせてない…ってことありませんか？\nあるある、聞かせてください😂",
+        (0, "{n}って、見せる派？隠す派？\nどっち派か教えてください👇"),
+        (1, "{n}、買ったのに使いこなせてない…ってことありませんか？\nあるある、聞かせてください😂"),
     ],
-    "clean": [
-        "{n}、こだわりありますか？\n①安さ重視 ②使い心地重視 ③とりあえず定番",
-    ],
+    "clean": [(0, "{n}、こだわりありますか？\n①安さ重視 ②使い心地重視 ③とりあえず定番")],
     "home": [
-        "おうち時間を快適にするのに、{n}って必要だと思いますか？\n①必須 ②あったら嬉しい ③なくて平気",
-        "{n}、使っている人いますか？\n使い心地を教えてほしいです👀",
+        (0, "おうち時間を快適にするのに、{n}って必要だと思いますか？\n①必須 ②あったら嬉しい ③なくて平気"),
+        (1, "{n}、使っている人いますか？\n使い心地を教えてほしいです👀"),
     ],
-    "beauty": ["{n}、プチプラ派？デパコス派？\nその理由も聞きたいです👇"],
-    "gadget": ["{n}、ちゃんと良いものを買う派？コスパ重視派？\nどっちか教えてください👇"],
-    "food": ["{n}、ストックしておく派？\n食べたいときに買う派？"],
+    "daily": [  # 消耗品: 「安いの vs 高いの」が最も伸びたので、その派生を厚めに
+        (0, "{n}、安いのと高いの、どっちを買う派？\n理由も知りたいです"),
+        (1, "{n}、ネットでまとめ買いする派？\nそれとも店舗でその都度買う派？"),
+        (2, "{n}って、ついいつものを選びがちじゃないですか？\n最近乗り換えた人、いますか？"),
+    ],
+    "beauty": [(0, "{n}、プチプラ派？デパコス派？\nその理由も聞きたいです👇")],
+    "gadget": [(0, "{n}、ちゃんと良いものを買う派？コスパ重視派？\nどっちか教えてください👇")],
+    "food": [(0, "{n}、ストックしておく派？\n食べたいときに買う派？")],
 }
 
-# 「質問のみ」投稿(商品なし・リンクなし)。誰でも答えられる広い話題で返信を集め、
-# アカウント全体のリーチを底上げする。広い質問ほど桁違いに伸びやすい。
-ENGAGEMENT_QUESTIONS: list[str] = [
-    "最近買ってよかったもの、1つだけ教えてください👇",
-    "「これは買って正解だった」って日用品、ありますか？\nジャンル問わず教えてください！",
-    "100均で「買ってよかった」ものは何ですか？",
-    "一人暮らしで「最初に買えばよかった」と思ったものは？",
-    "家事をラクにしてくれる神アイテム、あれば教えてください🙏",
-    "家の中で一番ストレスを感じる場所はどこ？\n①玄関 ②キッチン ③洗面所 ④クローゼット",
-    "ついつい溜まっちゃうものって何ですか？\n①紙類 ②ケーブル類 ③服 ④その他",
-    "寝る前のルーティン、みなさんは何してますか？👀",
-    "掃除するなら朝派？夜派？",
-    "休日の過ごし方、インドア派？アウトドア派？",
-    "1,000円以内で「生活の質が上がったもの」を教えてください！",
-    "部屋で一番長く過ごす場所はどこですか？\n①リビング ②寝室 ③ワークスペース",
-    "この季節になると買い足すもの、ありますか？",
-    "最近ちょっと贅沢したこと、ありますか？",
+# 「質問のみ」投稿(商品なし・リンクなし)。誰でも答えられる広い話題で返信を集め、アカウント全体のリーチを底上げする。
+# 分析結果: 閲覧数の幾何平均は商品投稿の約2.7倍。伸びた型 =「金額の条件」「最初に買えばよかった」「買って正解」。
+# 伸びなかった型(最近買ってよかったもの1つだけ/最近ちょっと贅沢)は削除。IDは固定。
+ENGAGEMENT_QUESTIONS: list[Tpl] = [
+    (1, "「これは買って正解だった」って日用品、ありますか？\nジャンル問わず教えてください！"),
+    (2, "100均で「買ってよかった」ものは何ですか？"),
+    (3, "一人暮らしで「最初に買えばよかった」と思ったものは？"),
+    (4, "家事をラクにしてくれる神アイテム、あれば教えてください🙏"),
+    (5, "家の中で一番ストレスを感じる場所はどこ？\n①玄関 ②キッチン ③洗面所 ④クローゼット"),
+    (6, "掃除するなら朝派？夜派？"),
+    (7, "寝る前のルーティン、みなさんは何してますか？👀"),
+    (8, "休日の過ごし方、インドア派？アウトドア派？"),
+    (9, "ついつい溜まっちゃうものって何ですか？\n①紙類 ②ケーブル類 ③服 ④その他"),
+    (10, "1,000円以内で「生活の質が上がったもの」を教えてください！"),
+    (12, "この季節になると買い足すもの、ありますか？"),
+    (13, "部屋で一番長く過ごす場所はどこですか？\n①リビング ②寝室 ③ワークスペース"),
+    # --- 新規(上位パターンの派生) ---
+    (14, "3,000円以内で「買ってよかった」と思った家電・日用品は何ですか？"),
+    (15, "一人暮らしを始める人に「これだけは買っとけ」って言うなら何ですか？"),
+    (16, "500円以内で「毎日使ってる」ものを教えてください！"),
+    (17, "「もっと早く買えばよかった」と思った日用品、ありますか？"),
 ]
 ENGAGEMENT_TOPIC = "暮らし"
 
 # トピックタグ(Threadsは1投稿1タグ)。ジャンルごとの広めのタグ。seasonalは商品名を使う。
 CATEGORY_TOPIC = {
-    "storage": "収納", "clean": "掃除", "home": "おうち時間",
+    "daily": "日用品", "storage": "収納", "clean": "掃除", "home": "おうち時間",
     "beauty": "プチプラコスメ", "gadget": "ガジェット", "food": "グルメ",
 }
 RECENT_KEEP = 12  # 直近N件のテンプレートは再利用しない(同じ文面の連投を避ける)
@@ -229,6 +246,7 @@ class Item:
     review_count: int | None
     postage_free: bool
     shop_name: str = ""
+    affiliate_rate: float | None = None  # 料率(%)。APIが返す場合のみ
 
 
 # ----------------------------- 設定 ------------------------------------------
@@ -290,8 +308,8 @@ def load_config() -> Config:
         lookahead_hours=_env_int("LOOKAHEAD_HOURS", 48, minimum=1),
         jitter_minutes=_env_int("SLOT_JITTER_MINUTES", 8),
         max_scheduled=_env_int("MAX_SCHEDULED", 10, minimum=1),
-        min_price=_env_int("MIN_PRICE", 500),
-        max_price=_env_int("MAX_PRICE", 8000, minimum=1),
+        min_price=_env_int("MIN_PRICE", 2000),
+        max_price=_env_int("MAX_PRICE", 12000, minimum=1),
         manual_keyword=os.environ.get("RAKUTEN_KEYWORD", "").strip(),
         custom_keywords=tuple(
             k.strip() for k in os.environ.get("RAKUTEN_KEYWORDS", "").split(",") if k.strip()
@@ -413,6 +431,7 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
             review_avg=item.review_avg,
             review_count=item.review_count,
             postage_free=item.postage_free,
+            affiliate_rate=item.affiliate_rate,
         )
     return entry
 
@@ -448,6 +467,11 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
         if not affiliate_url:
             continue  # 成果が計測されない通常URLは投稿しない
         try:
+            rate_raw = raw.get("affiliateRate")
+            rate = float(rate_raw) if rate_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            rate = None
+        try:
             code = raw["itemCode"]
             items.append(
                 Item(
@@ -460,6 +484,7 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
                     review_count=int(raw["reviewCount"]) if raw.get("reviewCount") not in (None, "") else None,
                     postage_free=raw.get("postageFlag") == 0,
                     shop_name=str(raw.get("shopName") or ""),
+                    affiliate_rate=rate,
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -474,8 +499,15 @@ def _is_eligible(item: Item, cfg: Config) -> bool:
 
 
 def _score(item: Item) -> float:
-    # 評価 × レビュー数(対数)。少数レビューの高評価に引っ張られないようにする
-    return (item.review_avg or 0.0) * math.log10((item.review_count or 0) + 10) + (0.3 if item.postage_free else 0.0)
+    """
+    信頼度(評価 × レビュー数の対数) × 1件売れたときの報酬見込み(価格 × 料率、対数)。
+    信頼度は「押されたリンクが買われる確率」、報酬見込みは「買われたときの金額」の代理指標。
+    対数を取るのは、高額商品だけが常に勝って売れにくい物ばかり選ぶことを防ぐため。
+    """
+    trust = (item.review_avg or 0.0) * math.log10((item.review_count or 0) + 10)
+    rate = item.affiliate_rate if item.affiliate_rate and item.affiliate_rate > 0 else DEFAULT_AFFILIATE_RATE
+    payout = math.log10(item.price * rate / 100 + 10)
+    return trust * payout + (0.3 if item.postage_free else 0.0)
 
 
 def pick_best(items: list[Item], excluded: set[str], cfg: Config) -> Item | None:
@@ -591,15 +623,19 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
                  template_weights: dict[str, float] | None = None) -> tuple[str, str, str | None, str]:
     """(本文, リプライ, トピック, テンプレートキー) を返す。本文はリンクなしの質問。"""
     cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
-    candidates = [(f"{c}:{i}", t) for c in cats for i, t in enumerate(TEMPLATES[c])]
+    candidates = [(f"{c}:{i}", t) for c in cats for i, t in TEMPLATES[c]]
     key, template = _pick_fresh(candidates, recent, template_weights)
     main_text = template.format(n=name)
 
     short_name = _truncate(clean_item_name(item.name), 26)
-    detail = f"{item.price:,}円"
+    parts = []
     if item.review_avg is not None and item.review_count is not None:
-        detail = f"★{item.review_avg:.1f}({item.review_count:,}件) / {detail}"
-    reply = f"参考までに👇\n{PR_LABEL}{short_name}\n{detail}\n{item.url}"
+        parts.append(f"★{item.review_avg:.1f}({item.review_count:,}件)")
+    if item.postage_free:
+        parts.append("送料無料")
+    parts.append(f"{item.price:,}円")
+    # 「参考までに」だけだと何が得か伝わらないため、評価・送料・価格を一行に並べて判断材料を渡す
+    reply = f"気になる方は参考にどうぞ👇\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
 
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
     return _truncate(main_text, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX), topic, key
@@ -607,7 +643,7 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
 
 def build_engagement_post(recent: list[str], template_weights: dict[str, float] | None = None) -> tuple[str, str]:
     """商品なしの質問のみ投稿。(本文, テンプレートキー)"""
-    key, text = _pick_fresh([(f"q:{i}", t) for i, t in enumerate(ENGAGEMENT_QUESTIONS)], recent, template_weights)
+    key, text = _pick_fresh([(f"q:{i}", t) for i, t in ENGAGEMENT_QUESTIONS], recent, template_weights)
     return _truncate(text, THREADS_TEXT_MAX), key
 
 
