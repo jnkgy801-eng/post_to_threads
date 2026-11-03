@@ -49,7 +49,8 @@ jobs:
           BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
           # Threadsチャンネルが複数ある場合のみ設定(任意)
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
-          # 任意: 空なら内蔵の「季節 + 定番」キーワードプールを使う
+          # 任意: 空なら内蔵の「季節 + 日用消耗品」キーワードプールを使う(推奨)。
+          # 設定すると全商品が category=general 扱いになり、カテゴリ別の学習が効かなくなる
           RAKUTEN_KEYWORDS: ${{ secrets.RAKUTEN_KEYWORDS }}
           RAKUTEN_KEYWORD: ${{ github.event_name == 'workflow_dispatch' && inputs.keyword || '' }}
           # スケジュール実行は常に本番(false)。手動実行はinputの値(既定true=ドライラン)
@@ -60,7 +61,7 @@ jobs:
           # 「質問のみ」投稿の時刻(JST)。none で無効化
           # ENGAGE_SLOTS_JST: "07:45"
           # 扱うジャンル。増やすほどアカウントのテーマが散るので、まずは暮らし系に絞るのを推奨
-          # NICHES: "storage,clean,home,seasonal"   # 他: beauty,gadget,food
+          # NICHES: "daily,seasonal,home"   # 既定。他: storage,clean,beauty,gadget,food
           # 分析結果(data/feedback.json)を投稿選定に使うか。既定は使う(データ不足の間は自動で完全ランダム)
           # USE_FEEDBACK: "false"   # 使わない場合のみ
         run: python scripts/schedule_to_buffer.py
