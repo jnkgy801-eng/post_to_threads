@@ -56,10 +56,19 @@ jobs:
           # スケジュール実行は常に本番(false)。手動実行はinputの値(既定true=ドライラン)
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
           # --- 任意の調整(変えたい場合のみコメントを外す) ---
-          # 商品投稿の時刻(JST)
-          # POST_SLOTS_JST: "12:10,18:45,21:45"
-          # 「質問のみ」投稿の時刻(JST)。none で無効化
-          # ENGAGE_SLOTS_JST: "07:45"
+          # 平日の商品投稿 / 質問のみ投稿の時刻(JST)。1日5投稿(朝1・昼1・夕1・夜2)。none で無効化
+          # POST_SLOTS_JST: "12:10,18:00,20:15"
+          # ENGAGE_SLOTS_JST: "07:45,22:15"
+          # 土日祝(休日は 9-10時・15-16時、以降は平日と同様)
+          # POST_SLOTS_WEEKEND_JST: "15:30,18:00,20:15"
+          # ENGAGE_SLOTS_WEEKEND_JST: "09:30,22:15"
+          # 祝日として扱う日(土日用の枠を使う)
+          HOLIDAYS_JST: "2026-11-23"
+          # セール期間(自分で公式ページを確認して日付を入れる)。開始2日前〜終了日にセール向け投稿になる
+          # SALE_EVENTS: "2026-12-04..2026-12-11:楽天スーパーSALE"
+          # 商品画像を本文に添付(false で無効)/ 最大枚数
+          # ATTACH_IMAGES: "true"
+          # MAX_IMAGES: "3"
           # 扱うジャンル。増やすほどアカウントのテーマが散るので、まずは暮らし系に絞るのを推奨
           # NICHES: "daily,seasonal,home"   # 既定。他: storage,clean,beauty,gadget,food
           # 分析結果(data/feedback.json)を投稿選定に使うか。既定は使う(データ不足の間は自動で完全ランダム)
