@@ -17,8 +17,17 @@
 
 任意の環境変数:
   BUFFER_CHANNEL_ID         Threads チャンネルID(未指定ならThreadsチャンネルを自動検出)
-  POST_SLOTS_JST            商品投稿の時刻(JST, カンマ区切り) 既定: 12:10,18:45,21:45
-  ENGAGE_SLOTS_JST          質問のみ投稿の時刻(JST)   既定: 07:45 (none で無効化)
+  POST_SLOTS_JST            平日の商品投稿の時刻(JST, カンマ区切り) 既定: 12:10,18:00,20:15
+  ENGAGE_SLOTS_JST          平日の質問のみ投稿の時刻(JST)          既定: 07:45,22:15 (none で無効化)
+  POST_SLOTS_WEEKEND_JST    土日祝の商品投稿の時刻   既定: 15:30,18:00,20:15
+  ENGAGE_SLOTS_WEEKEND_JST  土日祝の質問のみ投稿の時刻 既定: 09:30,22:15 (none で無効化)
+                            ※時刻は「通勤7-8時 / 昼12-13時 / 帰宅17:30-18:30 / 夜20-21時(最も利用が多い) / 就寝前22時〜」
+                              「休日は9-10時・15-16時、以降は平日と同様」という公開ノウハウに合わせた初期値
+  HOLIDAYS_JST              祝日として扱う日(YYYY-MM-DD, カンマ区切り)。土日用の枠を使う  例: 2026-11-23
+  SALE_EVENTS               開催期間を自分で指定するセール  例: 2026-12-04..2026-12-11:楽天スーパーSALE
+                            (カンマ区切りで複数可。開始2日前〜終了日に、セール向けの質問文とリプライ注記を使う)
+  ATTACH_IMAGES             商品画像を本文に添付するか 既定: true(画像付きは滞在時間・反応が伸びやすい)
+  MAX_IMAGES                添付する画像の最大枚数(1〜4)  既定: 3
   NICHES                    扱うジャンル(カンマ区切り) 既定: daily,seasonal,home
                             選択肢: daily storage clean home seasonal beauty gadget food
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
@@ -41,7 +50,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -138,6 +147,16 @@ TEMPLATES: dict[str, list[Tpl]] = {
         (9, "{n}で「もっと早く買えばよかった」って思ったこと、ありますか？\n後悔した人もぜひ😂"),
         (10, "{n}、「これにして正解だった」って選び方、ありますか？\n選んだ理由も聞きたいです👀"),
         (11, "{n}は\n①安いのを使い切る派 ②ちょっといいのを長く使う派\nどっちですか？"),
+        # --- 冒頭で止める「フック」付き(1〜3行以内・末尾は質問) ---
+        (12, "【正直どっち？】\n{n}、「毎回同じもの」派？「気分で変える」派？\n理由も知りたいです"),
+        (13, "ぶっちゃけ、{n}ってどこまでこだわりますか？\n本音を聞かせてください😂"),
+        (14, "先に答え合わせです。\n{n}で「買って後悔した」ポイント、1つだけ教えてください👇"),
+    ],
+    # セール期間中(SALE_EVENTS で指定した期間)だけ使う。{event} にセール名が入る
+    "sale": [
+        (0, "{event}、{n}は買う予定ですか？\n①もう買った ②これから買う ③様子見"),
+        (1, "{event}で{n}を狙ってる人、いますか？\n狙い目の理由も聞きたいです👀"),
+        (2, "{event}の買い物リスト、{n}は入ってますか？\n①入ってる ②迷い中 ③入ってない"),
     ],
     "seasonal": [
         (0, "そろそろ{n}の季節ですね。\nもう準備しましたか？\n①もう買った ②これから ③毎年ギリギリ"),
@@ -233,6 +252,12 @@ class Config:
     custom_keywords: tuple[str, ...]
     dry_run: bool
     use_feedback: bool = True
+    slots_weekend: tuple[tuple[int, int], ...] = ()
+    engage_slots_weekend: tuple[tuple[int, int], ...] = ()
+    holidays: frozenset[date] = frozenset()
+    sale_events: tuple[tuple[date, date, str], ...] = ()
+    attach_images: bool = True
+    max_images: int = 3
 
 
 @dataclass(frozen=True)
@@ -247,6 +272,7 @@ class Item:
     postage_free: bool
     shop_name: str = ""
     affiliate_rate: float | None = None  # 料率(%)。APIが返す場合のみ
+    image_urls: tuple[str, ...] = ()  # 商品画像(https)。Bufferが投稿時に取得する
 
 
 # ----------------------------- 設定 ------------------------------------------
@@ -281,6 +307,33 @@ def _parse_engage_slots(raw: str) -> tuple[tuple[int, int], ...]:
     return _parse_slots(raw, allow_empty=True)
 
 
+def _parse_dates(raw: str) -> frozenset[date]:
+    out: set[date] = set()
+    for token in (t.strip() for t in raw.split(",") if t.strip()):
+        try:
+            out.add(date.fromisoformat(token))
+        except ValueError as exc:
+            raise ConfigError(f"HOLIDAYS_JST の形式が不正です(YYYY-MM-DD): {token!r}") from exc
+    return frozenset(out)
+
+
+def _parse_sale_events(raw: str) -> tuple[tuple[date, date, str], ...]:
+    """'2026-12-04..2026-12-11:楽天スーパーSALE,2026-11-20..2026-11-27:ブラックフライデー' 形式。"""
+    events: list[tuple[date, date, str]] = []
+    for token in (t.strip() for t in raw.split(",") if t.strip()):
+        m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2}):(.+)", token)
+        if not m:
+            raise ConfigError(f"SALE_EVENTS の形式が不正です(開始..終了:名前): {token!r}")
+        try:
+            start, end = date.fromisoformat(m.group(1)), date.fromisoformat(m.group(2))
+        except ValueError as exc:
+            raise ConfigError(f"SALE_EVENTS の日付が不正です: {token!r}") from exc
+        if start > end:
+            raise ConfigError(f"SALE_EVENTS の開始日が終了日より後です: {token!r}")
+        events.append((start, end, m.group(3).strip()))
+    return tuple(events)
+
+
 def _parse_niches(raw: str) -> tuple[str, ...]:
     niches = tuple(n.strip() for n in raw.split(",") if n.strip())
     unknown = [n for n in niches if n not in VALID_NICHES]
@@ -302,8 +355,15 @@ def load_config() -> Config:
         rakuten_affiliate_id=os.environ["RAKUTEN_AFFILIATE_ID"].strip(),
         buffer_api_key=os.environ["BUFFER_API_KEY"].strip(),
         buffer_channel_id=os.environ.get("BUFFER_CHANNEL_ID", "").strip(),
-        slots=_parse_slots(os.environ.get("POST_SLOTS_JST", "").strip() or "12:10,18:45,21:45"),
-        engage_slots=_parse_engage_slots(os.environ.get("ENGAGE_SLOTS_JST", "").strip() or "07:45"),
+        slots=_parse_slots(os.environ.get("POST_SLOTS_JST", "").strip() or "12:10,18:00,20:15"),
+        engage_slots=_parse_engage_slots(os.environ.get("ENGAGE_SLOTS_JST", "").strip() or "07:45,22:15"),
+        slots_weekend=_parse_slots(os.environ.get("POST_SLOTS_WEEKEND_JST", "").strip() or "15:30,18:00,20:15"),
+        engage_slots_weekend=_parse_engage_slots(
+            os.environ.get("ENGAGE_SLOTS_WEEKEND_JST", "").strip() or "09:30,22:15"),
+        holidays=_parse_dates(os.environ.get("HOLIDAYS_JST", "")),
+        sale_events=_parse_sale_events(os.environ.get("SALE_EVENTS", "")),
+        attach_images=os.environ.get("ATTACH_IMAGES", "").strip().lower() not in {"0", "false", "no"},
+        max_images=_env_int("MAX_IMAGES", 3, minimum=1),
         niches=_parse_niches(os.environ.get("NICHES", "").strip() or DEFAULT_NICHES),
         lookahead_hours=_env_int("LOOKAHEAD_HOURS", 48, minimum=1),
         jitter_minutes=_env_int("SLOT_JITTER_MINUTES", 8),
@@ -319,6 +379,8 @@ def load_config() -> Config:
     )
     if cfg.min_price > cfg.max_price:
         raise ConfigError("MIN_PRICE が MAX_PRICE を超えています")
+    if cfg.max_images > 4:
+        raise ConfigError("MAX_IMAGES は 1〜4 で指定してください")
     return cfg
 
 
@@ -405,7 +467,8 @@ def append_post_log(entry: dict[str, Any]) -> None:
 
 def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: str | None,
                    main_text: str, reply_text: str | None, item: Item | None,
-                   name: str | None, category: str | None, keyword: str | None) -> dict[str, Any]:
+                   name: str | None, category: str | None, keyword: str | None,
+                   image_count: int = 0, sale_note: str | None = None) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
         "buffer_post_id": post_id,
@@ -420,6 +483,8 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "category": category,
         "keyword": keyword,
         "display_name": name,
+        "image_count": image_count,  # 画像付き/なしの比較用
+        "sale_note": sale_note,  # 5と0のつく日・セール注記の有無の比較用
     }
     if item:
         entry.update(
@@ -437,6 +502,23 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
 
 
 # ----------------------------- 楽天API ---------------------------------------
+def _image_urls(raw: dict[str, Any]) -> tuple[str, ...]:
+    """商品画像URL(https)を取り出す。API既定は128px四方なので、見やすい大きさに差し替える。"""
+    urls: list[str] = []
+    for key in ("mediumImageUrls", "smallImageUrls"):
+        for v in raw.get(key) or []:
+            u = v.get("imageUrl") if isinstance(v, dict) else v
+            if not isinstance(u, str) or not u:
+                continue
+            if u.startswith("http://"):
+                u = "https://" + u[len("http://"):]
+            if u.startswith("https://"):
+                urls.append(u.split("?")[0] + "?_ex=500x500")
+        if urls:
+            break
+    return tuple(dict.fromkeys(urls))
+
+
 def fetch_items(keyword: str, cfg: Config) -> list[Item]:
     params = {
         "applicationId": cfg.rakuten_app_id,
@@ -485,6 +567,7 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
                     postage_free=raw.get("postageFlag") == 0,
                     shop_name=str(raw.get("shopName") or ""),
                     affiliate_rate=rate,
+                    image_urls=_image_urls(raw),
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -619,13 +702,43 @@ def sanitize_topic(raw: str) -> str | None:
     return topic[:50] or None
 
 
+POINT_DAYS = frozenset({5, 10, 15, 20, 25, 30})  # 楽天の「5と0のつく日」
+
+
+def active_event(day: date, events: tuple[tuple[date, date, str], ...]) -> str | None:
+    """開始2日前〜終了日のセール名。「セール前から仕込む」ため、開始前も対象にする。"""
+    for start, end, name in events:
+        if start - timedelta(days=2) <= day <= end:
+            return name
+    return None
+
+
+def point_day_note(day: date) -> str | None:
+    """5と0のつく日・ワンダフルデー(毎月1日)の注記。特典の条件を省略して誤認させないよう「要エントリー」を添える。"""
+    if day.day in POINT_DAYS:
+        return "今日は5と0のつく日🎉(要エントリー・楽天カード利用でポイントUP)"
+    if (day + timedelta(days=1)).day in POINT_DAYS:
+        return "明日は5と0のつく日。今のうちにチェックしておくと◎"
+    if day.day == 1:
+        return "今日はワンダフルデー(要エントリー)"
+    return None
+
+
+# リプライの一言。リンク先が気になる一言にする(時間がない時は「コチラ！」だけでも可、という公開ノウハウより)。
+# 体験の偽装や効能の断定になる表現は入れない。
+REPLY_CAPTIONS = ("気になる方はコチラ👇", "ご参考までに👇", "リンクはこちらです👇", "チェックしてみてください👇")
+
+
 def build_thread(item: Item, name: str, category: str, recent: list[str],
-                 template_weights: dict[str, float] | None = None) -> tuple[str, str, str | None, str]:
+                 template_weights: dict[str, float] | None = None, *,
+                 day: date | None = None, sale_event: str | None = None) -> tuple[str, str, str | None, str]:
     """(本文, リプライ, トピック, テンプレートキー) を返す。本文はリンクなしの質問。"""
     cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
+    if sale_event and random.random() < 0.5:  # セール期間は半分をセール向けの質問にする
+        cats = ["sale"]
     candidates = [(f"{c}:{i}", t) for c in cats for i, t in TEMPLATES[c]]
     key, template = _pick_fresh(candidates, recent, template_weights)
-    main_text = template.format(n=name)
+    main_text = template.format(n=name, event=sale_event or "")
 
     short_name = _truncate(clean_item_name(item.name), 26)
     parts = []
@@ -635,7 +748,14 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
         parts.append("送料無料")
     parts.append(f"{item.price:,}円")
     # 「参考までに」だけだと何が得か伝わらないため、評価・送料・価格を一行に並べて判断材料を渡す
-    reply = f"気になる方は参考にどうぞ👇\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
+    caption = random.choice(REPLY_CAPTIONS)
+    if item.review_count and item.review_count >= 1000:
+        caption = f"レビュー{item.review_count:,}件の商品です👇"  # APIの値のみ使う(事実に限る)
+    note = point_day_note(day) if day else None
+    if sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
+        note = f"{sale_event}期間です。対象・条件はリンク先でご確認ください"
+    head = f"{note}\n{caption}" if note else caption
+    reply = f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
 
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
     return _truncate(main_text, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX), topic, key
@@ -658,10 +778,14 @@ def build_slots(now: datetime, cfg: Config) -> list[Slot]:
     """now〜now+LOOKAHEAD の範囲にある、JSTの基準時刻の枠を昇順で返す。"""
     earliest = now + timedelta(minutes=MIN_LEAD_MINUTES)
     latest = now + timedelta(hours=cfg.lookahead_hours)
-    plan = [(h, m, "product") for h, m in cfg.slots] + [(h, m, "engage") for h, m in cfg.engage_slots]
     slots: dict[datetime, Slot] = {}
     for day_offset in range(cfg.lookahead_hours // 24 + 2):
         day = (now + timedelta(days=day_offset)).date()
+        # 休日(土日祝)は「9-10時・15-16時」+ 以降は平日と同様、という利用時間帯に合わせる
+        weekend = day.weekday() >= 5 or day in cfg.holidays
+        product_slots = cfg.slots_weekend if weekend else cfg.slots
+        engage_slots = cfg.engage_slots_weekend if weekend else cfg.engage_slots
+        plan = [(h, m, "product") for h, m in product_slots] + [(h, m, "engage") for h, m in engage_slots]
         for hour, minute, kind in plan:
             at = datetime.combine(day, dtime(hour, minute), tzinfo=JST)
             if earliest <= at <= latest:
@@ -786,7 +910,7 @@ mutation CreatePost($input: CreatePostInput!) {
 
 
 def _create_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
-                 reply_text: str | None, topic: str | None) -> str:
+                 reply_text: str | None, topic: str | None, image_urls: tuple[str, ...] = ()) -> str:
     threads_meta: dict[str, Any] = {}
     if reply_text:
         threads_meta["thread"] = [{"text": main_text}, {"text": reply_text}]  # 本文+リプライ
@@ -801,6 +925,9 @@ def _create_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
     }
     if threads_meta:
         post_input["metadata"] = {"threads": threads_meta}
+    if image_urls:
+        # assets は「1要素=1アセット」の順序付き配列(Buffer API仕様)。画像URLは投稿時にBufferが取得する
+        post_input["assets"] = [{"image": {"url": u}} for u in image_urls]
 
     result = buffer_request(cfg, CREATE_POST_MUTATION, {"input": post_input}, is_write=True).get("createPost") or {}
     post = result.get("post")
@@ -813,17 +940,24 @@ def _create_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
 
 
 def schedule_post(cfg: Config, channel_id: str, due: datetime, main_text: str,
-                  reply_text: str | None = None, topic: str | None = None) -> str:
-    """予約を作成し Buffer の post id を返す。トピックタグが原因で弾かれた場合のみ、タグ無しで再試行する。"""
+                  reply_text: str | None = None, topic: str | None = None,
+                  image_urls: tuple[str, ...] = ()) -> str:
+    """
+    予約を作成し Buffer の post id を返す。
+    バリデーションエラー(=未登録)で、原因がトピックタグ/画像のときだけ、その要素を外して再試行する。
+    """
     try:
-        return _create_post(cfg, channel_id, due, main_text, reply_text, topic)
+        return _create_post(cfg, channel_id, due, main_text, reply_text, topic, image_urls)
     except BufferLimitReached:
         raise
     except BufferError as exc:
-        # バリデーションエラー(=未登録)の場合のみ安全に再送できる
-        if topic and re.search(r"topic", str(exc), re.IGNORECASE):
+        message = str(exc)
+        if image_urls and re.search(r"image|asset|media|dimension", message, re.IGNORECASE):
+            print(f"[警告] 画像が受け付けられないため、画像なしで再試行します: {exc}", file=sys.stderr)
+            return schedule_post(cfg, channel_id, due, main_text, reply_text, topic, ())
+        if topic and re.search(r"topic", message, re.IGNORECASE):
             print(f"[警告] トピックタグ({topic})が受け付けられないため、タグ無しで再試行します: {exc}", file=sys.stderr)
-            return _create_post(cfg, channel_id, due, main_text, reply_text, None)
+            return _create_post(cfg, channel_id, due, main_text, reply_text, None, image_urls)
         raise
 
 
@@ -872,6 +1006,8 @@ def main() -> int:
         name: str | None = None
         category: str | None = None
         keyword: str | None = None
+        image_urls: tuple[str, ...] = ()
+        sale_note: str | None = None
         if slot.kind == "engage":
             main_text, key = build_engagement_post(recent, template_weights)
             topic: str | None = ENGAGEMENT_TOPIC
@@ -882,12 +1018,19 @@ def main() -> int:
                 failures += 1
                 continue
             item, name, category, keyword = picked
-            main_text, reply_text, topic, key = build_thread(item, name, category, recent, template_weights)
+            day = slot.at.date()
+            sale_event = active_event(day, cfg.sale_events)
+            main_text, reply_text, topic, key = build_thread(
+                item, name, category, recent, template_weights, day=day, sale_event=sale_event)
+            image_urls = item.image_urls[: cfg.max_images] if cfg.attach_images else ()
+            sale_note = sale_event or point_day_note(day)
 
         due = slot.at + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
         print(f"--- {due:%Y-%m-%d %H:%M} JST [{slot.kind}] topic={topic} ---\n{main_text}")
         if reply_text:
             print(f"(リプライ)\n{reply_text}")
+        if image_urls:
+            print(f"(画像 {len(image_urls)}枚) " + " ".join(image_urls))
         print()
 
         if item:
@@ -897,7 +1040,7 @@ def main() -> int:
             continue
 
         try:
-            post_id = schedule_post(cfg, channel_id, due, main_text, reply_text, topic)
+            post_id = schedule_post(cfg, channel_id, due, main_text, reply_text, topic, image_urls)
         except BufferLimitReached as exc:
             print(f"[Buffer上限] 予約上限に達したため終了します: {exc}", file=sys.stderr)
             break
@@ -917,6 +1060,7 @@ def main() -> int:
             post_id=post_id, due=due, kind=slot.kind, key=key, topic=topic,
             main_text=main_text, reply_text=reply_text, item=item,
             name=name, category=category, keyword=keyword,
+            image_count=len(image_urls), sale_note=sale_note,
         ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
