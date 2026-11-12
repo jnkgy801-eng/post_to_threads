@@ -28,6 +28,8 @@
                             (カンマ区切りで複数可。開始2日前〜終了日に、セール向けの質問文とリプライ注記を使う)
   ATTACH_IMAGES             商品画像を本文に添付するか 既定: true(画像付きは滞在時間・反応が伸びやすい)
   MAX_IMAGES                添付する画像の最大枚数(1〜4)  既定: 3
+  POST_STYLE                本文の型  problem: 購入者の悩み→商品で解決できそう(既定) / question: 質問型(従来) / mixed: 半々
+                            ※問題解決型は AI を使わず、scripts/pain_points.py の辞書+商品名の仕様ワードで組み立てる(無料)
   NICHES                    扱うジャンル(カンマ区切り) 既定: daily,seasonal,home
                             選択肢: daily storage clean home seasonal beauty gadget food
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
@@ -56,6 +58,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+
+from pain_points import has_pain_match, pick_pain_point, render_problem
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -214,6 +218,44 @@ CATEGORY_TOPIC = {
 }
 RECENT_KEEP = 12  # 直近N件のテンプレートは再利用しない(同じ文面の連投を避ける)
 
+# ---------------------------------------------------------------------------
+# 問題解決型(POST_STYLE=problem)の文面。AI不使用・無料。
+#   本文 = 購入者の悩み(scripts/pain_points.py) + 解決策の一言 + 返信を促す軽い問いかけ。リンクは従来どおりリプライ側。
+# 景表法・薬機法の観点から、解決策は「商品ページに書かれた仕様」を根拠にし、断定せず「〜かもしれません」で結ぶ。
+# 「使ってみた」等の体験の偽装や、効能効果の表現は入れない。
+# テンプレートキーは "ps:{id}"。IDは固定(既存のIDを振り直さない)ので、分析ログ(post_log.jsonl)と突き合わせ可能。
+# ---------------------------------------------------------------------------
+DEFAULT_POST_STYLE = "problem"
+VALID_POST_STYLES = ("problem", "question", "mixed")
+PS_FRAMES: list[Tpl] = [
+    (1, "{problem}\n{solution}\n{closing}"),
+    (2, "{n}で、こんな悩みありませんか？\n{problem}\n\n{solution}\n{closing}"),
+    (3, "【{n}選びの悩み】\n{problem}\n\n{solution}\n{closing}"),
+    (4, "{problem}\n\nそんな方へ。\n{solution}\n{closing}"),
+    (5, "【悩み】{problem}\n【ヒント】{solution}\n{closing}"),
+]
+# 解決策の一言。{feat} は商品名/キャッチコピーに実在した仕様ワード(例: 静音)
+PS_SOLUTIONS_FEATURE = (
+    "「{feat}」とある{n}が、選択肢になりそうです。",
+    "「{feat}」と書かれた{n}なら、悩みに合うかもしれません。",
+    "商品ページに「{feat}」とある{n}を見つけました。",
+)
+# 仕様ワードが見つからないとき(悩みは「選び方の悩み」になる)は、APIが返す事実(レビュー・価格)を選ぶ目安として述べる。
+# 悩みを解決できるとは言わない。
+PS_SOLUTIONS_REVIEW = (
+    "迷ったら、レビュー{count:,}件(★{avg:.1f})の{n}が目安になりそうです。",
+    "選ぶ目安のひとつは、★{avg:.1f}・レビュー{count:,}件の{n}です。",
+)
+PS_SOLUTION_PRICE = "まずは{price:,}円の{n}から、チェックしてみてください。"
+# 返信を促す一言(Threadsは返信を最重視するため、問題解決型でも末尾は問いかけにする)
+PS_CLOSINGS = (
+    "同じ悩み、ありませんか？",
+    "みなさんは、どう解決していますか？👀",
+    "ほかにおすすめの方法があれば、教えてください🙏",
+    "{n}選びで気にしていること、聞きたいです👇",
+)
+PAIN_MATCH_BONUS = 1.15  # 悩みに応える仕様ワードを持つ商品を、選定スコアで少しだけ優遇する
+
 PR_LABEL = "【PR】"  # ステマ規制対応。#タグだとトピックタグ化されるため文字で明示する
 
 
@@ -258,6 +300,7 @@ class Config:
     sale_events: tuple[tuple[date, date, str], ...] = ()
     attach_images: bool = True
     max_images: int = 3
+    post_style: str = DEFAULT_POST_STYLE
 
 
 @dataclass(frozen=True)
@@ -273,6 +316,7 @@ class Item:
     shop_name: str = ""
     affiliate_rate: float | None = None  # 料率(%)。APIが返す場合のみ
     image_urls: tuple[str, ...] = ()  # 商品画像(https)。Bufferが投稿時に取得する
+    catchcopy: str = ""  # 商品のキャッチコピー。悩みに応える仕様ワードの検出にだけ使う(本文には出さない)
 
 
 # ----------------------------- 設定 ------------------------------------------
@@ -342,6 +386,12 @@ def _parse_niches(raw: str) -> tuple[str, ...]:
     return niches
 
 
+def _parse_post_style(raw: str) -> str:
+    if raw not in VALID_POST_STYLES:
+        raise ConfigError(f"POST_STYLE が不正です: {raw!r} (選択肢: {list(VALID_POST_STYLES)})")
+    return raw
+
+
 def load_config() -> Config:
     required = ["RAKUTEN_APP_ID", "RAKUTEN_ACCESS_KEY", "RAKUTEN_AFFILIATE_ID", "BUFFER_API_KEY"]
     missing = [k for k in required if not os.environ.get(k, "").strip()]
@@ -364,6 +414,7 @@ def load_config() -> Config:
         sale_events=_parse_sale_events(os.environ.get("SALE_EVENTS", "")),
         attach_images=os.environ.get("ATTACH_IMAGES", "").strip().lower() not in {"0", "false", "no"},
         max_images=_env_int("MAX_IMAGES", 3, minimum=1),
+        post_style=_parse_post_style(os.environ.get("POST_STYLE", "").strip().lower() or DEFAULT_POST_STYLE),
         niches=_parse_niches(os.environ.get("NICHES", "").strip() or DEFAULT_NICHES),
         lookahead_hours=_env_int("LOOKAHEAD_HOURS", 48, minimum=1),
         jitter_minutes=_env_int("SLOT_JITTER_MINUTES", 8),
@@ -468,7 +519,8 @@ def append_post_log(entry: dict[str, Any]) -> None:
 def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: str | None,
                    main_text: str, reply_text: str | None, item: Item | None,
                    name: str | None, category: str | None, keyword: str | None,
-                   image_count: int = 0, sale_note: str | None = None) -> dict[str, Any]:
+                   image_count: int = 0, sale_note: str | None = None,
+                   pain_feature: str | None = None) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
         "buffer_post_id": post_id,
@@ -485,6 +537,7 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "display_name": name,
         "image_count": image_count,  # 画像付き/なしの比較用
         "sale_note": sale_note,  # 5と0のつく日・セール注記の有無の比較用
+        "pain_feature": pain_feature,  # 問題解決型で、解決策の根拠にした仕様ワード(根拠あり/なしの比較用)
     }
     if item:
         entry.update(
@@ -568,6 +621,7 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
                     shop_name=str(raw.get("shopName") or ""),
                     affiliate_rate=rate,
                     image_urls=_image_urls(raw),
+                    catchcopy=str(raw.get("catchcopy") or ""),
                 )
             )
         except (KeyError, ValueError, TypeError):
@@ -581,7 +635,12 @@ def _is_eligible(item: Item, cfg: Config) -> bool:
     return cfg.min_price <= item.price <= cfg.max_price
 
 
-def _score(item: Item) -> float:
+def _pain_text(item: Item) -> str:
+    """悩みに応える仕様ワードの検出対象。商品説明文は否定文(「〜ではありません」)を拾い得るので使わない。"""
+    return f"{item.name} {item.catchcopy}"
+
+
+def _score(item: Item, keyword: str | None = None) -> float:
     """
     信頼度(評価 × レビュー数の対数) × 1件売れたときの報酬見込み(価格 × 料率、対数)。
     信頼度は「押されたリンクが買われる確率」、報酬見込みは「買われたときの金額」の代理指標。
@@ -590,10 +649,13 @@ def _score(item: Item) -> float:
     trust = (item.review_avg or 0.0) * math.log10((item.review_count or 0) + 10)
     rate = item.affiliate_rate if item.affiliate_rate and item.affiliate_rate > 0 else DEFAULT_AFFILIATE_RATE
     payout = math.log10(item.price * rate / 100 + 10)
-    return trust * payout + (0.3 if item.postage_free else 0.0)
+    score = trust * payout + (0.3 if item.postage_free else 0.0)
+    if keyword and has_pain_match(keyword, _pain_text(item)):
+        score *= PAIN_MATCH_BONUS  # 「悩みを解決する根拠」を本文に書ける商品のほうが、投稿として説得力が出る
+    return score
 
 
-def pick_best(items: list[Item], excluded: set[str], cfg: Config) -> Item | None:
+def pick_best(items: list[Item], excluded: set[str], cfg: Config, keyword: str | None = None) -> Item | None:
     pool = [i for i in items if i.code not in excluded and _is_eligible(i, cfg)]
     if not pool:
         return None
@@ -604,7 +666,7 @@ def pick_best(items: list[Item], excluded: set[str], cfg: Config) -> Item | None
     for min_avg, min_count in REVIEW_TIERS:
         tier = [i for i in pool if (i.review_avg or 0) >= min_avg and (i.review_count or 0) >= min_count]
         if tier:
-            return max(tier, key=_score)
+            return max(tier, key=lambda i: _score(i, keyword))
     return None
 
 
@@ -655,7 +717,8 @@ def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Confi
         except RakutenError as exc:
             print(f"[警告] 楽天API取得失敗: {exc}", file=sys.stderr)
             continue
-        item = pick_best(items, excluded, cfg)
+        # 質問型のときは従来どおりの選定(悩みマッチの優遇なし)にする
+        item = pick_best(items, excluded, cfg, query if cfg.post_style != "question" else None)
         if item:
             print(f"選定: keyword={query!r} / {item.name[:40]}")
             return item, name, category, query
@@ -727,19 +790,24 @@ def point_day_note(day: date) -> str | None:
 # リプライの一言。リンク先が気になる一言にする(時間がない時は「コチラ！」だけでも可、という公開ノウハウより)。
 # 体験の偽装や効能の断定になる表現は入れない。
 REPLY_CAPTIONS = ("気になる方はコチラ👇", "ご参考までに👇", "リンクはこちらです👇", "チェックしてみてください👇")
+# 問題解決型: 「合うかどうかは本人が確認する」前提の言い回しにする(断定を避ける)
+PS_REPLY_CAPTIONS = ("悩みに合うか、詳細はこちらで確認👇", "気になる方は、仕様・サイズをチェック👇", "詳細はこちらから確認できます👇")
 
 
-def build_thread(item: Item, name: str, category: str, recent: list[str],
-                 template_weights: dict[str, float] | None = None, *,
-                 day: date | None = None, sale_event: str | None = None) -> tuple[str, str, str | None, str]:
-    """(本文, リプライ, トピック, テンプレートキー) を返す。本文はリンクなしの質問。"""
-    cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
-    if sale_event and random.random() < 0.5:  # セール期間は半分をセール向けの質問にする
-        cats = ["sale"]
-    candidates = [(f"{c}:{i}", t) for c in cats for i, t in TEMPLATES[c]]
-    key, template = _pick_fresh(candidates, recent, template_weights)
-    main_text = template.format(n=name, event=sale_event or "")
+@dataclass(frozen=True)
+class Thread:
+    """1投稿ぶんの組み立て結果(本文+リプライ+トピック)。"""
 
+    main_text: str
+    reply_text: str
+    topic: str | None
+    key: str  # テンプレートキー(分析の重み付けに使う)。問題解決型は "ps:{id}"
+    pain_feature: str | None = None  # 解決策の根拠にした仕様ワード(無ければ None)。ログに残して効果を比較する
+
+
+def build_reply(item: Item, *, day: date | None, sale_event: str | None,
+                captions: tuple[str, ...] = REPLY_CAPTIONS) -> str:
+    """リンク入りのリプライ。評価・送料・価格を1行に並べて判断材料を渡す。"""
     short_name = _truncate(clean_item_name(item.name), 26)
     parts = []
     if item.review_avg is not None and item.review_count is not None:
@@ -747,18 +815,67 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
     if item.postage_free:
         parts.append("送料無料")
     parts.append(f"{item.price:,}円")
-    # 「参考までに」だけだと何が得か伝わらないため、評価・送料・価格を一行に並べて判断材料を渡す
-    caption = random.choice(REPLY_CAPTIONS)
+    caption = random.choice(captions)
     if item.review_count and item.review_count >= 1000:
         caption = f"レビュー{item.review_count:,}件の商品です👇"  # APIの値のみ使う(事実に限る)
     note = point_day_note(day) if day else None
     if sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
         note = f"{sale_event}期間です。対象・条件はリンク先でご確認ください"
     head = f"{note}\n{caption}" if note else caption
-    reply = f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
+    return f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
 
+
+def build_solution_line(item: Item, name: str, feature: str | None) -> str:
+    """解決策の一言。根拠は「商品ページの仕様ワード」→「レビュー」→「価格」の順で、事実だけを使う。"""
+    if feature:
+        return random.choice(PS_SOLUTIONS_FEATURE).format(feat=feature, n=name)
+    if item.review_avg is not None and item.review_count:
+        return random.choice(PS_SOLUTIONS_REVIEW).format(n=name, avg=item.review_avg, count=item.review_count)
+    return PS_SOLUTION_PRICE.format(n=name, price=item.price)
+
+
+def build_problem_solution_main(item: Item, name: str, keyword: str | None, recent: list[str],
+                                template_weights: dict[str, float] | None = None) -> tuple[str, str, str | None]:
+    """問題解決型の本文(リンクなし)。(本文, テンプレートキー, 根拠にした仕様ワード) を返す。"""
+    point, feature = pick_pain_point(keyword, _pain_text(item))
+    key, frame = _pick_fresh([(f"ps:{i}", t) for i, t in PS_FRAMES], recent, template_weights)
+    main_text = frame.format(
+        n=name,
+        problem=render_problem(point, name),
+        solution=build_solution_line(item, name, feature),
+        closing=random.choice(PS_CLOSINGS).format(n=name),
+    )
+    return _truncate(main_text, THREADS_TEXT_MAX), key, feature
+
+
+def build_question_main(name: str, category: str, recent: list[str],
+                        template_weights: dict[str, float] | None = None,
+                        sale_event: str | None = None) -> tuple[str, str]:
+    """質問型(従来)の本文。(本文, テンプレートキー) を返す。"""
+    cats = [category, "general"] if category in TEMPLATES and category != "general" else ["general"]
+    if sale_event and random.random() < 0.5:  # セール期間は半分をセール向けの質問にする
+        cats = ["sale"]
+    candidates = [(f"{c}:{i}", t) for c in cats for i, t in TEMPLATES[c]]
+    key, template = _pick_fresh(candidates, recent, template_weights)
+    return _truncate(template.format(n=name, event=sale_event or ""), THREADS_TEXT_MAX), key
+
+
+def build_thread(item: Item, name: str, category: str, recent: list[str],
+                 template_weights: dict[str, float] | None = None, *,
+                 day: date | None = None, sale_event: str | None = None,
+                 keyword: str | None = None, style: str = DEFAULT_POST_STYLE) -> Thread:
+    """本文はリンクなし。style=problem は悩み→解決策、question は質問、mixed は半々。"""
+    use_problem = style == "problem" or (style == "mixed" and random.random() < 0.5)
+    feature: str | None = None
+    if use_problem:
+        main_text, key, feature = build_problem_solution_main(item, name, keyword, recent, template_weights)
+    else:
+        main_text, key = build_question_main(name, category, recent, template_weights, sale_event)
+
+    reply = build_reply(item, day=day, sale_event=sale_event,
+                        captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS)
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
-    return _truncate(main_text, THREADS_TEXT_MAX), _truncate(reply, THREADS_TEXT_MAX), topic, key
+    return Thread(main_text, _truncate(reply, THREADS_TEXT_MAX), topic, key, feature)
 
 
 def build_engagement_post(recent: list[str], template_weights: dict[str, float] | None = None) -> tuple[str, str]:
@@ -1008,6 +1125,7 @@ def main() -> int:
         keyword: str | None = None
         image_urls: tuple[str, ...] = ()
         sale_note: str | None = None
+        pain_feature: str | None = None
         if slot.kind == "engage":
             main_text, key = build_engagement_post(recent, template_weights)
             topic: str | None = ENGAGEMENT_TOPIC
@@ -1020,8 +1138,10 @@ def main() -> int:
             item, name, category, keyword = picked
             day = slot.at.date()
             sale_event = active_event(day, cfg.sale_events)
-            main_text, reply_text, topic, key = build_thread(
-                item, name, category, recent, template_weights, day=day, sale_event=sale_event)
+            thread = build_thread(item, name, category, recent, template_weights,
+                                  day=day, sale_event=sale_event, keyword=keyword, style=cfg.post_style)
+            main_text, reply_text, topic, key = thread.main_text, thread.reply_text, thread.topic, thread.key
+            pain_feature = thread.pain_feature
             image_urls = item.image_urls[: cfg.max_images] if cfg.attach_images else ()
             sale_note = sale_event or point_day_note(day)
 
@@ -1060,7 +1180,7 @@ def main() -> int:
             post_id=post_id, due=due, kind=slot.kind, key=key, topic=topic,
             main_text=main_text, reply_text=reply_text, item=item,
             name=name, category=category, keyword=keyword,
-            image_count=len(image_urls), sale_note=sale_note,
+            image_count=len(image_urls), sale_note=sale_note, pain_feature=pain_feature,
         ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
