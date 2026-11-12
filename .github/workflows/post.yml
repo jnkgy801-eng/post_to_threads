@@ -69,6 +69,8 @@ jobs:
           # 商品画像を本文に添付(false で無効)/ 最大枚数
           # ATTACH_IMAGES: "true"
           # MAX_IMAGES: "3"
+          # 本文の型。problem: 悩み→商品で解決できそう(既定) / question: 質問型(従来) / mixed: 半々(効果比較用)
+          # POST_STYLE: "problem"
           # 扱うジャンル。増やすほどアカウントのテーマが散るので、まずは暮らし系に絞るのを推奨
           # NICHES: "daily,seasonal,home"   # 既定。他: storage,clean,beauty,gadget,food
           # 分析結果(data/feedback.json)を投稿選定に使うか。既定は使う(データ不足の間は自動で完全ランダム)
