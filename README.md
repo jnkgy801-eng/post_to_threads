@@ -102,6 +102,12 @@ https://hb.afl.rakuten.co.jp/...
 - 指標は閲覧数です。**閲覧数は売上と一致しない**ため、下の売上データの取り込みを併用してください。
 - 時間帯は重みに使いません(`threads_report.md` を見て、枠は人が判断)。
 
+### 商品の品質ガード(自動・無料)
+- 販売可能(`availability=1`)でない商品は紹介しません。
+- 成果が計測される楽天アフィリエイトURL(`hb.afl.rakuten.co.jp`)でない商品は紹介しません(報酬ゼロを防ぐ)。
+- URLが350字を超える商品は紹介しません。リプ欄のURLが途中で切れると成果が計測されないためで、文字数超過時は説明文だけを削ってURLは必ず残します。
+- 5と0のつく日・ワンダフルデーは、本文の締めの直前に「要エントリー」付きで入ります(購入の後押し)。
+
 ### 売上データの取り込み(半自動)
 楽天アフィリエイトのレポートを自動取得する公式APIは確認できなかったため、CSVを置く方式です。
 1. 楽天アフィリエイトの管理画面でショップ別レポートのCSVをダウンロード。
@@ -110,6 +116,10 @@ https://hb.afl.rakuten.co.jp/...
 
 重みは「紹介1回あたりの報酬」から計算し、紹介回数が少ない店は平均に寄せ、0.5〜2.0に制限します。報酬合計が0の間は何もしません。
 列名は「ショップ」「確定報酬/発生報酬/報酬/売上」を自動判定し、判定できなければ列名を表示して止まります。手元実行: `python scripts/import_rakuten_report.py`
+
+CSVにクリック数の列があれば、`data/sales_report.md` に **閲覧数(Threads) → クリック → 報酬** をショップ別に並べます。
+どこで離脱しているか(クリック率が低い=本文・導線、クリックはあるのに報酬0=商品・価格・ページ側)を見分けられます。
+また、`threads_report.md` の「訴求要素別」で、割安表示・単価・仕様ワード・5と0の日・締め・リンク位置ごとの閲覧数と返信率を比較できます。
 
 ## セットアップ
 1. **楽天ウェブサービス / アフィリエイト**: Application ID・Access Key・アフィリエイトIDを取得。
@@ -137,6 +147,7 @@ https://hb.afl.rakuten.co.jp/...
 | `NICHES` | `daily,seasonal` | 他: `home storage clean beauty gadget food` |
 | `POST_STYLE` | `problem` | `problem`(購入導線型) / `question`(質問型) / `mixed` |
 | `ASK_CLOSING_RATIO` | `0` | 本文の締めを質問にする割合(0〜1) |
+| `LINK_IN_MAIN_RATIO` | `0` | リンクを本文に置く実験の割合(0〜1)。本文に置く投稿は【PR】が先頭に付き、リプ欄は無し |
 | `PR_IN_MAIN` | `false` | `true` で本文先頭にも【PR】(リプ欄は常に付く) |
 | `MIN_PRICE` / `MAX_PRICE` | `2000` / `12000` | 価格帯 |
 | `ATTACH_IMAGES` / `MAX_IMAGES` | `true` / `3` | 商品画像の添付 |
@@ -157,7 +168,7 @@ scripts/
   pain_points.py              悩み辞書 ※必須
   analyze_threads.py          Threads分析
   import_rakuten_report.py    売上CSV → ショップ別の重み
-data/                         実行で自動更新される(posted.json など)
+data/                         実行で自動更新される(posted.json / sales_weights.json / sales_report.md など)
   rakuten_reports/            売上CSVを置く場所
 tests/test_offer_copy.py      単体テスト
 requirements.txt              requests
