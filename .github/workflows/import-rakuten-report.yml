@@ -29,7 +29,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/sales_weights.json
+          for f in data/sales_weights.json data/sales_report.md; do [ -f "$f" ] && git add "$f"; done
           git diff --staged --quiet || git commit -m "chore: update shop weights from Rakuten report"
           git pull --rebase
           git push
