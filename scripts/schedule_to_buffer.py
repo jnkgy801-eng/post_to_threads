@@ -30,8 +30,10 @@
   MAX_IMAGES                添付する画像の最大枚数(1〜4)  既定: 3
   POST_STYLE                本文の型  problem: 購入者の悩み→商品で解決できそう(既定) / question: 質問型(従来) / mixed: 半々
                             ※問題解決型は AI を使わず、scripts/pain_points.py の辞書+商品名の仕様ワードで組み立てる(無料)
-  NICHES                    扱うジャンル(カンマ区切り) 既定: daily,seasonal,home
+  NICHES                    扱うジャンル(カンマ区切り) 既定: daily,seasonal
                             選択肢: daily storage clean home seasonal beauty gadget food
+  PR_IN_MAIN                本文の先頭にも【PR】を付けるか 既定: false(リプ欄のリンク側には常に【PR】を付ける)
+  ASK_CLOSING_RATIO         本文の締めを「質問」にする割合(0〜1) 既定: 0(購入優先。全て「リプ欄へ誘導」)
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
   SLOT_JITTER_MINUTES       各枠に足すランダム分数        既定: 8
   MAX_SCHEDULED             予約の上限(無料プランは10)    既定: 10
@@ -49,9 +51,11 @@ import math
 import os
 import random
 import re
+import statistics
 import sys
 import time
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -87,14 +91,18 @@ def _p(query: str, name: str | None = None) -> Pair:
 
 NICHE_KEYWORDS: dict[str, list[Pair]] = {
     # 分析結果(2026-10〜11): 日用消耗品は「誰でも意見がある」ため返信・閲覧が伸び、リピート購入で成果にもつながる。
-    "daily": [_p("洗濯洗剤"), _p("トイレットペーパー"), _p("ドリップコーヒー"), _p("ティッシュ ボックス", "ティッシュ"),
-              _p("柔軟剤"), _p("食器用洗剤"), _p("炭酸水")],
+    # 分析(2026-11-15, 閲覧数の幾何平均): 食器用洗剤342 / 洗濯洗剤185 / 柔軟剤161 / ドリップコーヒー142 が上位。
+    # 炭酸水(20)は閲覧が極端に低いため除外。トイレットペーパー(88)は返信率が高い(1.7%)ので残す。
+    # ※ 件数が少ない(多くが n<=11)ので「傾向」として扱い、重みは feedback.json 側で自動調整される。
+    "daily": [_p("食器用洗剤"), _p("洗濯洗剤"), _p("柔軟剤"), _p("ドリップコーヒー"),
+              _p("トイレットペーパー"), _p("ティッシュ ボックス", "ティッシュ")],
     "storage": [_p("収納ケース"), _p("隙間 収納", "隙間収納"), _p("ケーブル 収納", "ケーブル収納"),
                 _p("キッチン 収納", "キッチン収納"), _p("衣類 収納", "衣類収納")],
     "clean": [_p("掃除 ブラシ", "掃除グッズ"), _p("洗濯洗剤"), _p("時短 便利グッズ", "時短グッズ"),
               _p("排水口 ネット", "排水口ネット"), _p("スポンジ 食器洗い", "食器洗いスポンジ")],
-    "home": [_p("入浴剤"), _p("アイマスク 温め", "アイマスク"), _p("ルームフレグランス"),
-             _p("着る毛布"), _p("快眠 枕", "枕")],
+    # home は閲覧数(幾何平均32, n=5)・入浴剤43/ルームフレグランス29/着る毛布30 と全体的に低いため、既定のジャンルから外した。
+    # (NICHES=daily,seasonal,home で再び有効化できる)
+    "home": [_p("入浴剤"), _p("アイマスク 温め", "アイマスク"), _p("快眠 枕", "枕")],
     # 以下は既定では使わない(NICHES で追加できる)
     "beauty": [_p("シートマスク"), _p("ヘアオイル"), _p("リップ 保湿", "リップ"), _p("ハンドクリーム"), _p("日焼け止め")],
     # モバイルバッテリーは閲覧数が全体の1/4(幾何平均26)だったため除外
@@ -113,11 +121,11 @@ SEASONAL_KEYWORDS: dict[int, list[Pair]] = {
     7: [_p("携帯扇風機"), _p("冷感タオル"), _p("日傘"), _p("冷感 敷きパッド", "冷感敷きパッド"), _p("除湿機")],
     8: [_p("携帯扇風機"), _p("冷感タオル"), _p("日傘"), _p("冷感 敷きパッド", "冷感敷きパッド"), _p("サーキュレーター")],
     9: [_p("空気清浄機"), _p("加湿器"), _p("ロボット掃除機"), _p("衣替え 収納", "衣替え収納"), _p("サーキュレーター")],
-    10: [_p("加湿器"), _p("着る毛布"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ")],
-    11: [_p("電気毛布"), _p("こたつ"), _p("加湿器"), _p("セラミックヒーター"), _p("布団乾燥機")],
-    12: [_p("電気毛布"), _p("こたつ"), _p("セラミックヒーター"), _p("結露 対策", "結露対策"), _p("布団乾燥機")],
+    10: [_p("加湿器"), _p("電気毛布"), _p("空気清浄機"), _p("こたつ"), _p("セラミックヒーター")],
+    11: [_p("電気毛布"), _p("こたつ"), _p("加湿器"), _p("セラミックヒーター"), _p("空気清浄機")],
+    12: [_p("電気毛布"), _p("こたつ"), _p("セラミックヒーター"), _p("加湿器"), _p("結露 対策", "結露対策")],
 }
-DEFAULT_NICHES = "daily,seasonal,home"
+DEFAULT_NICHES = "daily,seasonal"
 VALID_NICHES = set(NICHE_KEYWORDS) | {"seasonal"}
 
 # 投稿対象から外す商品(規制商材・ふるさと納税・中古・予約など)
@@ -227,18 +235,20 @@ RECENT_KEEP = 12  # 直近N件のテンプレートは再利用しない(同じ�
 # ---------------------------------------------------------------------------
 DEFAULT_POST_STYLE = "problem"
 VALID_POST_STYLES = ("problem", "question", "mixed")
+# 旧フレーム(ID 1〜5)は「悩み→選択肢になりそう→質問」で閲覧・返信は狙えるが、購入の後押し(根拠・次の行動)が弱かった。
+# ID 6〜 は「悩み → 解決の根拠 → 判断材料(評価/送料/単価) → リプ欄へ誘導」の購入導線型。IDは固定で、旧IDは欠番として残す。
+#   {problem}=悩み / {solution}=解決の根拠(商品ページの仕様ワード) / {proof}=判断材料(事実のみ) / {cta}=次の行動
 PS_FRAMES: list[Tpl] = [
-    (1, "{problem}\n{solution}\n{closing}"),
-    (2, "{n}で、こんな悩みありませんか？\n{problem}\n\n{solution}\n{closing}"),
-    (3, "【{n}選びの悩み】\n{problem}\n\n{solution}\n{closing}"),
-    (4, "{problem}\n\nそんな方へ。\n{solution}\n{closing}"),
-    (5, "【悩み】{problem}\n【ヒント】{solution}\n{closing}"),
+    (6, "{problem}\n\n{solution}\n{proof}\n\n{cta}"),
+    (7, "{n}で、こんな悩みありませんか？\n{problem}\n\n{solution}\n{proof}\n\n{cta}"),
+    (8, "{problem}\n↓\n{solution}\n{proof}\n\n{cta}"),
+    (9, "{n}\n{proof}\n\n{problem}\n{solution}\n{cta}"),
 ]
-# 解決策の一言。{feat} は商品名/キャッチコピーに実在した仕様ワード(例: 静音)
+# 解決策の一言。{feat} は商品名/キャッチコピーに実在した仕様ワード(例: 静音)。断定はせず「合いそう」で結ぶ。
 PS_SOLUTIONS_FEATURE = (
-    "「{feat}」とある{n}が、選択肢になりそうです。",
-    "「{feat}」と書かれた{n}なら、悩みに合うかもしれません。",
-    "商品ページに「{feat}」とある{n}を見つけました。",
+    "「{feat}」と明記された{n}なら、この悩みに合いそうです。",
+    "{n}を探すなら、「{feat}」とあるものが候補になりそうです。",
+    "商品名に「{feat}」とある{n}が、ちょうど良さそうです。",
 )
 # 仕様ワードが見つからないとき(悩みは「選び方の悩み」になる)は、APIが返す事実(レビュー・価格)を選ぶ目安として述べる。
 # 悩みを解決できるとは言わない。
@@ -247,13 +257,22 @@ PS_SOLUTIONS_REVIEW = (
     "選ぶ目安のひとつは、★{avg:.1f}・レビュー{count:,}件の{n}です。",
 )
 PS_SOLUTION_PRICE = "まずは{price:,}円の{n}から、チェックしてみてください。"
-# 返信を促す一言(Threadsは返信を最重視するため、問題解決型でも末尾は問いかけにする)
+# 次の行動(CTA)。リンクは本文に置けない(リーチ低下を避けるためリプ欄)ので、リプ欄の存在を明示して導線にする。
+OFFER_CTAS = (
+    "気になる方は、下のリプ欄に詳細を置いておきます👇",
+    "価格・レビューの詳細は、下のリプ欄から確認できます👇",
+    "リンクは下のリプ欄にあります👇",
+    "仕様・サイズは、下のリプ欄で確認できます👇",
+)
+# 返信を促す締め(リーチ重視)。全体の ASK_CLOSING_RATIO だけ使い、残りは OFFER_CTAS(購入導線)にする。
 PS_CLOSINGS = (
     "同じ悩み、ありませんか？",
     "みなさんは、どう解決していますか？👀",
     "ほかにおすすめの方法があれば、教えてください🙏",
     "{n}選びで気にしていること、聞きたいです👇",
 )
+DEFAULT_ASK_CLOSING_RATIO = 0.0
+REVIEW_PROOF_MIN = 100  # レビュー件数がこれ未満なら、判断材料として本文に出さない(少数の高評価は信頼材料になりにくい)
 PAIN_MATCH_BONUS = 1.15  # 悩みに応える仕様ワードを持つ商品を、選定スコアで少しだけ優遇する
 
 PR_LABEL = "【PR】"  # ステマ規制対応。#タグだとトピックタグ化されるため文字で明示する
@@ -301,6 +320,8 @@ class Config:
     attach_images: bool = True
     max_images: int = 3
     post_style: str = DEFAULT_POST_STYLE
+    pr_in_main: bool = False
+    ask_closing_ratio: float = DEFAULT_ASK_CLOSING_RATIO
 
 
 @dataclass(frozen=True)
@@ -317,6 +338,10 @@ class Item:
     affiliate_rate: float | None = None  # 料率(%)。APIが返す場合のみ
     image_urls: tuple[str, ...] = ()  # 商品画像(https)。Bufferが投稿時に取得する
     catchcopy: str = ""  # 商品のキャッチコピー。悩みに応える仕様ワードの検出にだけ使う(本文には出さない)
+    unit_per: float | None = None  # 1ロール/1kg等あたりの価格(商品名から数量が一意に決まるときだけ)
+    unit_label: str | None = None  # 単価の単位(例: 1ロール / 1kg)
+    peer_unit_median: float | None = None  # 同じ検索結果内の同単位の単価の中央値
+    peer_unit_n: int = 0  # 上記の算出に使った件数
 
 
 # ----------------------------- 設定 ------------------------------------------
@@ -378,6 +403,20 @@ def _parse_sale_events(raw: str) -> tuple[tuple[date, date, str], ...]:
     return tuple(events)
 
 
+def _env_ratio(name: str, default: float) -> float:
+    """0〜1 の小数を環境変数から読む。範囲外・不正値は設定ミスとして止める(黙って既定に戻さない)。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} は 0〜1 の数値で指定してください: {raw!r}") from exc
+    if not 0.0 <= value <= 1.0:
+        raise ConfigError(f"{name} は 0〜1 の範囲で指定してください: {value}")
+    return value
+
+
 def _parse_niches(raw: str) -> tuple[str, ...]:
     niches = tuple(n.strip() for n in raw.split(",") if n.strip())
     unknown = [n for n in niches if n not in VALID_NICHES]
@@ -427,6 +466,8 @@ def load_config() -> Config:
         ),
         dry_run=os.environ.get("DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
         use_feedback=os.environ.get("USE_FEEDBACK", "").strip().lower() not in {"0", "false", "no"},
+        pr_in_main=os.environ.get("PR_IN_MAIN", "").strip().lower() in {"1", "true", "yes"},
+        ask_closing_ratio=_env_ratio("ASK_CLOSING_RATIO", DEFAULT_ASK_CLOSING_RATIO),
     )
     if cfg.min_price > cfg.max_price:
         raise ConfigError("MIN_PRICE が MAX_PRICE を超えています")
@@ -503,6 +544,23 @@ def load_feedback() -> dict[str, dict[str, float]]:
 
 
 
+SALES_WEIGHTS_FILE = POSTED_FILE.with_name("sales_weights.json")
+
+
+def load_shop_weights() -> dict[str, float]:
+    """scripts/import_rakuten_report.py が作る、ショップ別の売上重み。無い・壊れている場合は空(=影響なし)。"""
+    try:
+        data = json.loads(SALES_WEIGHTS_FILE.read_text(encoding="utf-8"))
+        raw = data.get("shop_weights", {}) if isinstance(data, dict) else {}
+        return {
+            str(k): min(WEIGHT_MAX, max(WEIGHT_MIN, float(v)))
+            for k, v in raw.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
 def append_post_log(entry: dict[str, Any]) -> None:
     """
     予約成功ごとに1行(JSON Lines)追記する。後で Threads のインサイトや楽天レポートと突き合わせる元データ。
@@ -520,7 +578,7 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
                    main_text: str, reply_text: str | None, item: Item | None,
                    name: str | None, category: str | None, keyword: str | None,
                    image_count: int = 0, sale_note: str | None = None,
-                   pain_feature: str | None = None) -> dict[str, Any]:
+                   pain_feature: str | None = None, closing_type: str | None = None) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
         "buffer_post_id": post_id,
@@ -538,6 +596,7 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "image_count": image_count,  # 画像付き/なしの比較用
         "sale_note": sale_note,  # 5と0のつく日・セール注記の有無の比較用
         "pain_feature": pain_feature,  # 問題解決型で、解決策の根拠にした仕様ワード(根拠あり/なしの比較用)
+        "closing_type": closing_type,  # cta(リプ欄誘導) / ask(質問)。購入導線と返信狙いの比較用
     }
     if item:
         entry.update(
@@ -550,6 +609,10 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
             review_count=item.review_count,
             postage_free=item.postage_free,
             affiliate_rate=item.affiliate_rate,
+            unit_per=item.unit_per,
+            unit_label=item.unit_label,
+            peer_unit_median=item.peer_unit_median,
+            deal_percent=deal_percent(item),
         )
     return entry
 
@@ -640,7 +703,10 @@ def _pain_text(item: Item) -> str:
     return f"{item.name} {item.catchcopy}"
 
 
-def _score(item: Item, keyword: str | None = None) -> float:
+DEAL_BONUS = 1.10  # 同じ検索結果の中央値より単価が安い商品を、少しだけ優先する(購入されやすさの代理)
+
+
+def _score(item: Item, keyword: str | None = None, shop_weights: dict[str, float] | None = None) -> float:
     """
     信頼度(評価 × レビュー数の対数) × 1件売れたときの報酬見込み(価格 × 料率、対数)。
     信頼度は「押されたリンクが買われる確率」、報酬見込みは「買われたときの金額」の代理指標。
@@ -652,10 +718,15 @@ def _score(item: Item, keyword: str | None = None) -> float:
     score = trust * payout + (0.3 if item.postage_free else 0.0)
     if keyword and has_pain_match(keyword, _pain_text(item)):
         score *= PAIN_MATCH_BONUS  # 「悩みを解決する根拠」を本文に書ける商品のほうが、投稿として説得力が出る
+    if deal_percent(item) is not None:
+        score *= DEAL_BONUS
+    if shop_weights:  # 楽天アフィリエイトの売上レポート由来(scripts/import_rakuten_report.py)
+        score *= shop_weights.get(item.shop_name, 1.0)
     return score
 
 
-def pick_best(items: list[Item], excluded: set[str], cfg: Config, keyword: str | None = None) -> Item | None:
+def pick_best(items: list[Item], excluded: set[str], cfg: Config, keyword: str | None = None,
+              shop_weights: dict[str, float] | None = None) -> Item | None:
     pool = [i for i in items if i.code not in excluded and _is_eligible(i, cfg)]
     if not pool:
         return None
@@ -666,8 +737,14 @@ def pick_best(items: list[Item], excluded: set[str], cfg: Config, keyword: str |
     for min_avg, min_count in REVIEW_TIERS:
         tier = [i for i in pool if (i.review_avg or 0) >= min_avg and (i.review_count or 0) >= min_count]
         if tier:
-            return max(tier, key=lambda i: _score(i, keyword))
+            return max(tier, key=lambda i: _score(i, keyword, shop_weights))
     return None
+
+
+# Threads利用者(20〜30代中心・隙間時間に閲覧)が「ついで買い」しやすい日用品を主役にする。
+# 季節ワードは増やさず、出現回数だけ減らす(従来は2倍で入れていた)。
+DAILY_REPEAT = 2
+SEASONAL_REPEAT = 1
 
 
 def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str, str]]:
@@ -678,7 +755,8 @@ def build_keyword_pool(cfg: Config, now: datetime) -> list[tuple[str, str, str]]
         return [(k, k, "general") for k in cfg.custom_keywords]
     pool: list[tuple[str, str, str]] = []
     for niche in cfg.niches:
-        pairs = SEASONAL_KEYWORDS[now.month] * 2 if niche == "seasonal" else NICHE_KEYWORDS[niche]
+        pairs = (SEASONAL_KEYWORDS[now.month] * SEASONAL_REPEAT if niche == "seasonal"
+                 else NICHE_KEYWORDS[niche] * (DAILY_REPEAT if niche == "daily" else 1))
         pool += [(q, name, niche) for q, name in pairs]
     return pool
 
@@ -702,7 +780,8 @@ def ordered_candidates(pool: list[tuple[str, str, str]],
 
 
 def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Config,
-                feedback: dict[str, dict[str, float]] | None = None) -> tuple[Item, str, str, str] | None:
+                feedback: dict[str, dict[str, float]] | None = None,
+                shop_weights: dict[str, float] | None = None) -> tuple[Item, str, str, str] | None:
     """(商品, 表示名, カテゴリ, 検索キーワード) を返す。見つからなければ None。"""
     tried: set[str] = set()
     candidates = ordered_candidates(pool, feedback)
@@ -718,7 +797,8 @@ def select_item(pool: list[tuple[str, str, str]], excluded: set[str], cfg: Confi
             print(f"[警告] 楽天API取得失敗: {exc}", file=sys.stderr)
             continue
         # 質問型のときは従来どおりの選定(悩みマッチの優遇なし)にする
-        item = pick_best(items, excluded, cfg, query if cfg.post_style != "question" else None)
+        items = annotate_unit_prices(items, query)
+        item = pick_best(items, excluded, cfg, query if cfg.post_style != "question" else None, shop_weights)
         if item:
             print(f"選定: keyword={query!r} / {item.name[:40]}")
             return item, name, category, query
@@ -759,6 +839,122 @@ def _pick_fresh(candidates: list[tuple[str, str]], recent: list[str],
     return random.choice(fresh)
 
 
+# ---------------------------------------------------------------------------
+# 単価の表示と「割安」の根拠づけ。
+# 景表法(有利誤認)の観点から、(1) 数量が商品名から一意に決まるときだけ単価を出す、
+# (2) 「安い」と書くのは、同じ検索結果の同単位の商品との比較で根拠を示せるときだけにする。
+# 「12ロール×8パック」「2個セット」のように倍数が絡む表記は誤計算しやすいので、まとめて対象外にする。
+# ---------------------------------------------------------------------------
+_COUNT = lambda unit: re.compile(rf"(\d{{1,3}})\s?({unit})")  # noqa: E731
+_VOLUME = re.compile(r"(\d{1,5}(?:\.\d{1,2})?)\s?(kg|g|l|ml)(?![a-zA-Z])", re.IGNORECASE)
+# キーワード: (正規表現, 種別, 数量の下限, 上限)  種別 count=個数 / volume=重量・容量(kg/L換算)
+UNIT_RULES: dict[str, tuple[re.Pattern[str], str, float, float]] = {
+    "トイレットペーパー": (_COUNT("ロール"), "count", 6, 400),
+    "ドリップコーヒー": (_COUNT("杯|袋|包"), "count", 10, 300),
+    "洗濯洗剤": (_VOLUME, "volume", 0.3, 20),
+    "柔軟剤": (_VOLUME, "volume", 0.3, 20),
+    "食器用洗剤": (_VOLUME, "volume", 0.3, 20),
+}
+MULTIPLIER_GUARD = re.compile(r"[×✕xX＊*]\s?\d|\d\s?[×✕＊*]|\d+\s?(?:個|袋|本|パック)?\s?(?:セット|ケース|箱)")
+PEER_MIN = 8  # 比較に使う同単位の商品が、これ未満なら「安い」とは書かない
+DEAL_MIN_PERCENT = 10  # 中央値より何%以上安ければ「安い」と書くか
+DEAL_MAX_PERCENT = 60  # これを超える差は、数量の誤読を疑って「安い」と書かない
+
+
+def compute_unit_price(name: str, price: int, keyword: str | None) -> tuple[float, str] | None:
+    """(単価, 単位) を返す。数量が一意に決まらなければ None。"""
+    rule = UNIT_RULES.get(keyword or "")
+    if not rule or price <= 0:
+        return None
+    pattern, kind, lo, hi = rule
+    text = unicodedata.normalize("NFKC", name)
+    if MULTIPLIER_GUARD.search(text):
+        return None
+    found: set[tuple[float, str]] = set()
+    for m in pattern.finditer(text):
+        if kind == "count":
+            found.add((float(m.group(1)), m.group(2)))
+        else:  # kg / L に換算して揃える
+            value, unit = float(m.group(1)), m.group(2).lower()
+            found.add((value / 1000, "kg") if unit == "g" else (value / 1000, "L") if unit == "ml"
+                      else (value, "kg") if unit == "kg" else (value, "L"))
+    if len(found) != 1:
+        return None  # 0件=不明 / 2件以上=本体+詰め替え等で曖昧
+    qty, unit = next(iter(found))
+    if not lo <= qty <= hi:
+        return None
+    return price / qty, f"1{unit}"
+
+
+def annotate_unit_prices(items: list[Item], keyword: str | None) -> list[Item]:
+    """各商品に単価を付け、同じ検索結果内の同単位の中央値(PEER_MIN 件以上のときだけ)を添える。"""
+    per_item = [(it, compute_unit_price(it.name, it.price, keyword)) for it in items]
+    by_label: dict[str, list[float]] = {}
+    for _it, up in per_item:
+        if up:
+            by_label.setdefault(up[1], []).append(up[0])
+    out: list[Item] = []
+    for it, up in per_item:
+        if not up:
+            out.append(it)
+            continue
+        peers = by_label[up[1]]
+        median = statistics.median(peers) if len(peers) >= PEER_MIN else None
+        out.append(replace(it, unit_per=up[0], unit_label=up[1],
+                           peer_unit_median=median, peer_unit_n=len(peers) if median else 0))
+    return out
+
+
+def deal_percent(item: Item) -> int | None:
+    """同じ検索結果の中央値より単価が何%安いか。根拠が足りない・差が不自然なら None。"""
+    if not (item.unit_per and item.peer_unit_median and item.peer_unit_n >= PEER_MIN):
+        return None
+    pct = round((1 - item.unit_per / item.peer_unit_median) * 100)
+    return pct if DEAL_MIN_PERCENT <= pct <= DEAL_MAX_PERCENT else None
+
+
+def _yen(value: float) -> str:
+    return f"{value:.0f}円" if value >= 10 else f"{value:.1f}円"
+
+
+def unit_price_text(item: Item) -> str | None:
+    if item.unit_per is None or item.unit_label is None:
+        return None
+    return f"{item.unit_label}あたり約{_yen(item.unit_per)}"
+
+
+def deal_text(item: Item) -> str | None:
+    """「お得」の詳細。比較の根拠(何と比べたか)を必ず併記する。"""
+    pct = deal_percent(item)
+    if pct is None or item.peer_unit_median is None:
+        return None
+    return (f"💡同じ検索結果の{item.peer_unit_n}件の{item.unit_label}あたり中央値(約{_yen(item.peer_unit_median)})より、"
+            f"約{pct}%安い単価です")
+
+
+def build_proof_line(item: Item, *, with_reviews: bool, with_price: bool) -> tuple[str, bool]:
+    """
+    判断材料(事実のみ)。(テキスト, 単価を含むか) を返す。
+    1行目: ★評価・送料無料・単価・価格 / 2行目: 割安の根拠つき説明(比較できたときだけ)。
+    レビューは件数が十分なときだけ出す。
+    """
+    parts: list[str] = []
+    if with_reviews and item.review_avg is not None and (item.review_count or 0) >= REVIEW_PROOF_MIN:
+        parts.append(f"★{item.review_avg:.1f}({item.review_count:,}件)")
+    if item.postage_free:
+        parts.append("送料無料")
+    unit = unit_price_text(item)
+    if unit:
+        parts.append(unit)
+    if with_price:
+        parts.append(f"{item.price:,}円")
+    lines = ["・".join(parts)] if parts else []
+    deal = deal_text(item)
+    if deal:
+        lines.append(deal)
+    return "\n".join(lines), unit is not None
+
+
 def sanitize_topic(raw: str) -> str | None:
     """Threadsのトピックタグ規則(ピリオド・&不可、50字以内)に合わせる。"""
     topic = re.sub(r"[.&#＃]", "", raw).strip()
@@ -791,7 +987,7 @@ def point_day_note(day: date) -> str | None:
 # 体験の偽装や効能の断定になる表現は入れない。
 REPLY_CAPTIONS = ("気になる方はコチラ👇", "ご参考までに👇", "リンクはこちらです👇", "チェックしてみてください👇")
 # 問題解決型: 「合うかどうかは本人が確認する」前提の言い回しにする(断定を避ける)
-PS_REPLY_CAPTIONS = ("悩みに合うか、詳細はこちらで確認👇", "気になる方は、仕様・サイズをチェック👇", "詳細はこちらから確認できます👇")
+PS_REPLY_CAPTIONS = ("仕様・サイズ・最新の価格はこちらで確認できます👇", "気になる方は、商品ページで詳細をチェック👇", "レビューや在庫もリンク先で確認できます👇")
 
 
 @dataclass(frozen=True)
@@ -803,10 +999,12 @@ class Thread:
     topic: str | None
     key: str  # テンプレートキー(分析の重み付けに使う)。問題解決型は "ps:{id}"
     pain_feature: str | None = None  # 解決策の根拠にした仕様ワード(無ければ None)。ログに残して効果を比較する
+    closing_type: str | None = None  # "cta"(リプ欄へ誘導) / "ask"(質問)。購入導線と返信狙いの比較用
+    has_unit_price: bool = False  # 単価を本文に出したか(リプ欄に「目安」の注記を付けるため)
 
 
 def build_reply(item: Item, *, day: date | None, sale_event: str | None,
-                captions: tuple[str, ...] = REPLY_CAPTIONS) -> str:
+                captions: tuple[str, ...] = REPLY_CAPTIONS, unit_note: bool = False) -> str:
     """リンク入りのリプライ。評価・送料・価格を1行に並べて判断材料を渡す。"""
     short_name = _truncate(clean_item_name(item.name), 26)
     parts = []
@@ -822,7 +1020,9 @@ def build_reply(item: Item, *, day: date | None, sale_event: str | None,
     if sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
         note = f"{sale_event}期間です。対象・条件はリンク先でご確認ください"
     head = f"{note}\n{caption}" if note else caption
-    return f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}\n{item.url}"
+    tail = ("\n※単価は掲載価格÷数量の目安です。比較は予約時点の楽天検索結果が対象で、送料・クーポンは含みません"
+            if unit_note else "")
+    return f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}{tail}\n※価格・在庫は変動します\n{item.url}"
 
 
 def build_solution_line(item: Item, name: str, feature: str | None) -> str:
@@ -835,17 +1035,34 @@ def build_solution_line(item: Item, name: str, feature: str | None) -> str:
 
 
 def build_problem_solution_main(item: Item, name: str, keyword: str | None, recent: list[str],
-                                template_weights: dict[str, float] | None = None) -> tuple[str, str, str | None]:
-    """問題解決型の本文(リンクなし)。(本文, テンプレートキー, 根拠にした仕様ワード) を返す。"""
+                                template_weights: dict[str, float] | None = None,
+                                ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO,
+                                ) -> tuple[str, str, str | None, str, bool]:
+    """
+    購入導線型の本文(リンクなし)。
+    (本文, テンプレートキー, 根拠にした仕様ワード, 締めの種類, 単価を含むか) を返す。
+    """
     point, feature = pick_pain_point(keyword, _pain_text(item))
     key, frame = _pick_fresh([(f"ps:{i}", t) for i, t in PS_FRAMES], recent, template_weights)
+    # 解決策の根拠が「レビュー/価格」のときは、判断材料の行で同じ数値を繰り返さない
+    has_review = item.review_avg is not None and bool(item.review_count)
+    proof, has_unit = build_proof_line(
+        item,
+        with_reviews=feature is not None or not has_review,
+        with_price=feature is not None or has_review,
+    )
+    use_ask = random.random() < ask_ratio
+    closing_type = "ask" if use_ask else "cta"
+    cta = (random.choice(PS_CLOSINGS).format(n=name) if use_ask else random.choice(OFFER_CTAS))
     main_text = frame.format(
         n=name,
         problem=render_problem(point, name),
         solution=build_solution_line(item, name, feature),
-        closing=random.choice(PS_CLOSINGS).format(n=name),
+        proof=proof,
+        cta=cta,
     )
-    return _truncate(main_text, THREADS_TEXT_MAX), key, feature
+    main_text = re.sub(r"\n{3,}", "\n\n", main_text).strip()  # proofが空のときの空行を畳む
+    return _truncate(main_text, THREADS_TEXT_MAX), key, feature, closing_type, has_unit
 
 
 def build_question_main(name: str, category: str, recent: list[str],
@@ -863,19 +1080,26 @@ def build_question_main(name: str, category: str, recent: list[str],
 def build_thread(item: Item, name: str, category: str, recent: list[str],
                  template_weights: dict[str, float] | None = None, *,
                  day: date | None = None, sale_event: str | None = None,
-                 keyword: str | None = None, style: str = DEFAULT_POST_STYLE) -> Thread:
-    """本文はリンクなし。style=problem は悩み→解決策、question は質問、mixed は半々。"""
+                 keyword: str | None = None, style: str = DEFAULT_POST_STYLE,
+                 pr_in_main: bool = False, ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO) -> Thread:
+    """本文はリンクなし。style=problem は購入導線型(悩み→根拠→判断材料→CTA)、question は質問、mixed は半々。"""
     use_problem = style == "problem" or (style == "mixed" and random.random() < 0.5)
     feature: str | None = None
+    closing_type: str | None = None
+    has_unit = False
     if use_problem:
-        main_text, key, feature = build_problem_solution_main(item, name, keyword, recent, template_weights)
+        main_text, key, feature, closing_type, has_unit = build_problem_solution_main(
+            item, name, keyword, recent, template_weights, ask_ratio)
     else:
         main_text, key = build_question_main(name, category, recent, template_weights, sale_event)
+    if pr_in_main:
+        # ステマ規制: フィードで本文だけを見た人にも広告と分かるよう、先頭に明示する(リプ欄だけでは不十分になり得る)
+        main_text = _truncate(f"{PR_LABEL}{main_text}", THREADS_TEXT_MAX)
 
     reply = build_reply(item, day=day, sale_event=sale_event,
-                        captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS)
+                        captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS, unit_note=has_unit)
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
-    return Thread(main_text, _truncate(reply, THREADS_TEXT_MAX), topic, key, feature)
+    return Thread(main_text, _truncate(reply, THREADS_TEXT_MAX), topic, key, feature, closing_type, has_unit)
 
 
 def build_engagement_post(recent: list[str], template_weights: dict[str, float] | None = None) -> tuple[str, str]:
@@ -1093,6 +1317,9 @@ def main() -> int:
     else:
         print("分析フィードバック: なし(データ不足 または 無効)→ 完全ランダムで選定")
     template_weights = feedback.get("template_weights")
+    shop_weights = load_shop_weights() if cfg.use_feedback else {}
+    if shop_weights:
+        print(f"売上レポート由来のショップ重み: 有効({len(shop_weights)}店)")
 
     now = datetime.now(JST)
     slots = build_slots(now, cfg)
@@ -1126,11 +1353,12 @@ def main() -> int:
         image_urls: tuple[str, ...] = ()
         sale_note: str | None = None
         pain_feature: str | None = None
+        closing_type: str | None = None
         if slot.kind == "engage":
             main_text, key = build_engagement_post(recent, template_weights)
             topic: str | None = ENGAGEMENT_TOPIC
         else:
-            picked = select_item(pool, posted | chosen_now, cfg, feedback)
+            picked = select_item(pool, posted | chosen_now, cfg, feedback, shop_weights)
             if not picked:
                 print(f"[警告] {slot.at:%m/%d %H:%M} に使える商品が見つかりませんでした", file=sys.stderr)
                 failures += 1
@@ -1139,9 +1367,11 @@ def main() -> int:
             day = slot.at.date()
             sale_event = active_event(day, cfg.sale_events)
             thread = build_thread(item, name, category, recent, template_weights,
-                                  day=day, sale_event=sale_event, keyword=keyword, style=cfg.post_style)
+                                  day=day, sale_event=sale_event, keyword=keyword, style=cfg.post_style,
+                                  pr_in_main=cfg.pr_in_main, ask_ratio=cfg.ask_closing_ratio)
             main_text, reply_text, topic, key = thread.main_text, thread.reply_text, thread.topic, thread.key
             pain_feature = thread.pain_feature
+            closing_type = thread.closing_type
             image_urls = item.image_urls[: cfg.max_images] if cfg.attach_images else ()
             sale_note = sale_event or point_day_note(day)
 
@@ -1181,6 +1411,7 @@ def main() -> int:
             main_text=main_text, reply_text=reply_text, item=item,
             name=name, category=category, keyword=keyword,
             image_count=len(image_urls), sale_note=sale_note, pain_feature=pain_feature,
+            closing_type=closing_type,
         ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
