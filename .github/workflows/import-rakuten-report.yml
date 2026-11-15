@@ -1,0 +1,35 @@
+name: Import Rakuten affiliate report
+
+# data/rakuten_reports/ にCSVを追加(GitHubの画面からアップロードでOK)すると、ショップ別の売上重みを更新する。
+on:
+  push:
+    paths:
+      - "data/rakuten_reports/*.csv"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-rakuten-report
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build shop weights from report
+        run: python scripts/import_rakuten_report.py
+      - name: Commit weights
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/sales_weights.json
+          git diff --staged --quiet || git commit -m "chore: update shop weights from Rakuten report"
+          git pull --rebase
+          git push
