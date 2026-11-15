@@ -388,6 +388,19 @@ def build_report(rows: list[dict[str, Any]], fb: dict[str, Any], now: datetime, 
     out += _table(product, lambda r: f"{r.get('hour_jst'):02d}時台" if isinstance(r.get("hour_jst"), int) else None, "時間帯別(参考: 重みには使いません)")
     out += _table(rows, lambda r: r.get("template_key"), "テンプレート別(商品+質問のみ)")
 
+    # 訴求要素別: 購入導線型(closing_type が記録されている投稿)だけで、何が反応に効いたかを比べる。
+    # 注意: 閲覧数・返信率の比較であり、購入への効果そのものではない(売上は楽天のレポートで確認)。
+    appeal = [r for r in product if r.get("closing_type")]
+    if appeal:
+        out += ["## 訴求要素別(購入導線型のみ)", ""]
+        yn = lambda v: "あり" if v else "なし"  # noqa: E731
+        out += _table(appeal, lambda r: yn(r.get("deal_percent")), "割安表示(「約○%安い」)")
+        out += _table(appeal, lambda r: yn(r.get("unit_per")), "単価表示")
+        out += _table(appeal, lambda r: yn(r.get("pain_feature")), "仕様ワードの根拠")
+        out += _table(appeal, lambda r: yn(r.get("sale_note")), "5と0のつく日などの注記")
+        out += _table(appeal, lambda r: r.get("closing_type"), "締めの種類(cta=リプ欄誘導 / ask=質問)")
+        out += _table(appeal, lambda r: "本文" if r.get("link_in_main") else "リプ欄", "リンクの位置")
+
     shop_rows = defaultdict(list)
     for r in product:
         if r.get("shop_name"):

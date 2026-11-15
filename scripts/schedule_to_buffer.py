@@ -34,6 +34,7 @@
                             選択肢: daily storage clean home seasonal beauty gadget food
   PR_IN_MAIN                本文の先頭にも【PR】を付けるか 既定: false(リプ欄のリンク側には常に【PR】を付ける)
   ASK_CLOSING_RATIO         本文の締めを「質問」にする割合(0〜1) 既定: 0(購入優先。全て「リプ欄へ誘導」)
+  LINK_IN_MAIN_RATIO        リンクを本文に置く実験の割合(0〜1) 既定: 0(リプ欄方式のみ)。本文に置く投稿は【PR】が先頭に付く
   LOOKAHEAD_HOURS           何時間先まで予約を埋めるか    既定: 48
   SLOT_JITTER_MINUTES       各枠に足すランダム分数        既定: 8
   MAX_SCHEDULED             予約の上限(無料プランは10)    既定: 10
@@ -243,6 +244,9 @@ PS_FRAMES: list[Tpl] = [
     (7, "{n}で、こんな悩みありませんか？\n{problem}\n\n{solution}\n{proof}\n\n{cta}"),
     (8, "{problem}\n↓\n{solution}\n{proof}\n\n{cta}"),
     (9, "{n}\n{proof}\n\n{problem}\n{solution}\n{cta}"),
+    (10, "{problem}\n{solution}\n\n▼判断材料\n{proof}\n\n{cta}"),
+    (11, "{n}を探している人へ。\n{problem}\n{solution}\n{proof}\n\n{cta}"),
+    (12, "【チェック】{n}\n{problem}\n{solution}\n{proof}\n\n{cta}"),
 ]
 # 解決策の一言。{feat} は商品名/キャッチコピーに実在した仕様ワード(例: 静音)。断定はせず「合いそう」で結ぶ。
 PS_SOLUTIONS_FEATURE = (
@@ -263,7 +267,11 @@ OFFER_CTAS = (
     "価格・レビューの詳細は、下のリプ欄から確認できます👇",
     "リンクは下のリプ欄にあります👇",
     "仕様・サイズは、下のリプ欄で確認できます👇",
+    "気になる方は、下のリプ欄をのぞいてみてください👇",
+    "商品ページへのリンクは、下のリプ欄です👇",
 )
+# 本文にリンクを置く実験用(LINK_IN_MAIN_RATIO)。リンクの直前に置くので「こちら」で誘導する。
+OFFER_CTAS_MAIN = ("価格・レビューはこちらで確認できます👇", "気になる方は、こちらから商品ページへ👇", "詳細はこちら👇")
 # 返信を促す締め(リーチ重視)。全体の ASK_CLOSING_RATIO だけ使い、残りは OFFER_CTAS(購入導線)にする。
 PS_CLOSINGS = (
     "同じ悩み、ありませんか？",
@@ -322,6 +330,7 @@ class Config:
     post_style: str = DEFAULT_POST_STYLE
     pr_in_main: bool = False
     ask_closing_ratio: float = DEFAULT_ASK_CLOSING_RATIO
+    link_in_main_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -468,6 +477,7 @@ def load_config() -> Config:
         use_feedback=os.environ.get("USE_FEEDBACK", "").strip().lower() not in {"0", "false", "no"},
         pr_in_main=os.environ.get("PR_IN_MAIN", "").strip().lower() in {"1", "true", "yes"},
         ask_closing_ratio=_env_ratio("ASK_CLOSING_RATIO", DEFAULT_ASK_CLOSING_RATIO),
+        link_in_main_ratio=_env_ratio("LINK_IN_MAIN_RATIO", 0.0),
     )
     if cfg.min_price > cfg.max_price:
         raise ConfigError("MIN_PRICE が MAX_PRICE を超えています")
@@ -578,7 +588,8 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
                    main_text: str, reply_text: str | None, item: Item | None,
                    name: str | None, category: str | None, keyword: str | None,
                    image_count: int = 0, sale_note: str | None = None,
-                   pain_feature: str | None = None, closing_type: str | None = None) -> dict[str, Any]:
+                   pain_feature: str | None = None, closing_type: str | None = None,
+                   link_in_main: bool = False) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
         "buffer_post_id": post_id,
@@ -596,6 +607,7 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "image_count": image_count,  # 画像付き/なしの比較用
         "sale_note": sale_note,  # 5と0のつく日・セール注記の有無の比較用
         "pain_feature": pain_feature,  # 問題解決型で、解決策の根拠にした仕様ワード(根拠あり/なしの比較用)
+        "link_in_main": link_in_main,  # 本文にリンクを置いたか(リプ欄誘導との比較)
         "closing_type": closing_type,  # cta(リプ欄誘導) / ask(質問)。購入導線と返信狙いの比較用
     }
     if item:
@@ -662,8 +674,12 @@ def fetch_items(keyword: str, cfg: Config) -> list[Item]:
     for entry in data.get("Items", []):
         raw: dict[str, Any] = entry.get("Item", entry)
         affiliate_url = raw.get("affiliateUrl") or ""
-        if not affiliate_url:
-            continue  # 成果が計測されない通常URLは投稿しない
+        if len(affiliate_url) > MAX_AFFILIATE_URL_LEN:
+            continue
+        if AFFILIATE_URL_HOST not in affiliate_url:
+            continue  # 成果が計測されない通常URLは投稿しない(報酬ゼロを防ぐ)
+        if str(raw.get("availability", "1")) != "1":
+            continue  # 販売不可の商品は紹介しない(クリックされても買えない)
         try:
             rate_raw = raw.get("affiliateRate")
             rate = float(rate_raw) if rate_raw not in (None, "") else None
@@ -703,6 +719,8 @@ def _pain_text(item: Item) -> str:
     return f"{item.name} {item.catchcopy}"
 
 
+MAX_AFFILIATE_URL_LEN = 350  # これを超えるURLは、【PR】や説明文と合わせて500字に収まらず、途中で切れて壊れるため紹介しない
+AFFILIATE_URL_HOST = "hb.afl.rakuten.co.jp"  # 楽天アフィリエイトの計測つきURL
 DEAL_BONUS = 1.10  # 同じ検索結果の中央値より単価が安い商品を、少しだけ優先する(購入されやすさの代理)
 
 
@@ -995,16 +1013,18 @@ class Thread:
     """1投稿ぶんの組み立て結果(本文+リプライ+トピック)。"""
 
     main_text: str
-    reply_text: str
+    reply_text: str | None  # 本文にリンクを置いた投稿(link_in_main)では None
     topic: str | None
     key: str  # テンプレートキー(分析の重み付けに使う)。問題解決型は "ps:{id}"
     pain_feature: str | None = None  # 解決策の根拠にした仕様ワード(無ければ None)。ログに残して効果を比較する
     closing_type: str | None = None  # "cta"(リプ欄へ誘導) / "ask"(質問)。購入導線と返信狙いの比較用
     has_unit_price: bool = False  # 単価を本文に出したか(リプ欄に「目安」の注記を付けるため)
+    link_in_main: bool = False  # 本文にリンクを置いたか(リプ欄誘導との比較実験)
 
 
 def build_reply(item: Item, *, day: date | None, sale_event: str | None,
-                captions: tuple[str, ...] = REPLY_CAPTIONS, unit_note: bool = False) -> str:
+                captions: tuple[str, ...] = REPLY_CAPTIONS, unit_note: bool = False,
+                include_point_note: bool = True) -> str:
     """リンク入りのリプライ。評価・送料・価格を1行に並べて判断材料を渡す。"""
     short_name = _truncate(clean_item_name(item.name), 26)
     parts = []
@@ -1016,7 +1036,7 @@ def build_reply(item: Item, *, day: date | None, sale_event: str | None,
     caption = random.choice(captions)
     if item.review_count and item.review_count >= 1000:
         caption = f"レビュー{item.review_count:,}件の商品です👇"  # APIの値のみ使う(事実に限る)
-    note = point_day_note(day) if day else None
+    note = point_day_note(day) if (day and include_point_note) else None
     if sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
         note = f"{sale_event}期間です。対象・条件はリンク先でご確認ください"
     head = f"{note}\n{caption}" if note else caption
@@ -1037,6 +1057,7 @@ def build_solution_line(item: Item, name: str, feature: str | None) -> str:
 def build_problem_solution_main(item: Item, name: str, keyword: str | None, recent: list[str],
                                 template_weights: dict[str, float] | None = None,
                                 ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO,
+                                day: date | None = None, link_in_main: bool = False,
                                 ) -> tuple[str, str, str | None, str, bool]:
     """
     購入導線型の本文(リンクなし)。
@@ -1051,9 +1072,15 @@ def build_problem_solution_main(item: Item, name: str, keyword: str | None, rece
         with_reviews=feature is not None or not has_review,
         with_price=feature is not None or has_review,
     )
-    use_ask = random.random() < ask_ratio
+    use_ask = random.random() < ask_ratio and not link_in_main
     closing_type = "ask" if use_ask else "cta"
-    cta = (random.choice(PS_CLOSINGS).format(n=name) if use_ask else random.choice(OFFER_CTAS))
+    if use_ask:
+        cta = random.choice(PS_CLOSINGS).format(n=name)
+    else:
+        cta = random.choice(OFFER_CTAS_MAIN if link_in_main else OFFER_CTAS)
+    point_note = point_day_note(day) if day else None
+    if point_note:  # 「今日は5と0のつく日」は購入の背中を押す事実なので、本文の締めの直前に入れる
+        cta = f"{point_note}\n{cta}"
     main_text = frame.format(
         n=name,
         problem=render_problem(point, name),
@@ -1062,7 +1089,7 @@ def build_problem_solution_main(item: Item, name: str, keyword: str | None, rece
         cta=cta,
     )
     main_text = re.sub(r"\n{3,}", "\n\n", main_text).strip()  # proofが空のときの空行を畳む
-    return _truncate(main_text, THREADS_TEXT_MAX), key, feature, closing_type, has_unit
+    return main_text, key, feature, closing_type, has_unit
 
 
 def build_question_main(name: str, category: str, recent: list[str],
@@ -1077,29 +1104,64 @@ def build_question_main(name: str, category: str, recent: list[str],
     return _truncate(template.format(n=name, event=sale_event or ""), THREADS_TEXT_MAX), key
 
 
+def _fit_reply(reply: str, url: str, limit: int) -> str:
+    """文字数制限に合わせて説明部分だけを削る。末尾のURLは絶対に切らない(切れると成果が計測されない)。"""
+    if len(reply) <= limit:
+        return reply
+    body = reply[: -len(url)].rstrip("\n") if reply.endswith(url) else reply
+    budget = limit - len(url) - 1
+    if budget < 10:
+        return url
+    return f"{_truncate(body, budget)}\n{url}"
+
+
 def build_thread(item: Item, name: str, category: str, recent: list[str],
                  template_weights: dict[str, float] | None = None, *,
                  day: date | None = None, sale_event: str | None = None,
                  keyword: str | None = None, style: str = DEFAULT_POST_STYLE,
-                 pr_in_main: bool = False, ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO) -> Thread:
-    """本文はリンクなし。style=problem は購入導線型(悩み→根拠→判断材料→CTA)、question は質問、mixed は半々。"""
+                 pr_in_main: bool = False, ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO,
+                 link_in_main_ratio: float = 0.0) -> Thread:
+    """
+    本文は既定でリンクなし(リンクはリプ欄)。style=problem は購入導線型、question は質問、mixed は半々。
+    link_in_main_ratio: 本文にリンクを置く実験の割合。長さ超過・単価表示ありの場合はリプ欄方式に戻す。
+    """
     use_problem = style == "problem" or (style == "mixed" and random.random() < 0.5)
     feature: str | None = None
     closing_type: str | None = None
     has_unit = False
-    if use_problem:
-        main_text, key, feature, closing_type, has_unit = build_problem_solution_main(
-            item, name, keyword, recent, template_weights, ask_ratio)
-    else:
-        main_text, key = build_question_main(name, category, recent, template_weights, sale_event)
-    if pr_in_main:
-        # ステマ規制: フィードで本文だけを見た人にも広告と分かるよう、先頭に明示する(リプ欄だけでは不十分になり得る)
-        main_text = _truncate(f"{PR_LABEL}{main_text}", THREADS_TEXT_MAX)
+    link_in_main = use_problem and random.random() < link_in_main_ratio
+    for _attempt in range(2):
+        if use_problem:
+            main_text, key, feature, closing_type, has_unit = build_problem_solution_main(
+                item, name, keyword, recent, template_weights, ask_ratio, day=day, link_in_main=link_in_main)
+        else:
+            main_text, key = build_question_main(name, category, recent, template_weights, sale_event)
+        if not link_in_main:
+            break
+        # リンクを本文に置くと、その投稿自体が広告そのものになるので【PR】は必須。URLは途中で切れると壊れるため、収まらなければ戻す。
+        candidate = f"{PR_LABEL}{main_text}\n{item.url}"
+        if has_unit or len(candidate) > THREADS_TEXT_MAX:
+            link_in_main = False
+            continue
+        main_text = candidate
+        break
+    else:  # 2回目も link_in_main=False で組み立て済み
+        pass
 
-    reply = build_reply(item, day=day, sale_event=sale_event,
-                        captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS, unit_note=has_unit)
+    if link_in_main:
+        reply: str | None = None
+    else:
+        main_text = _truncate(main_text, THREADS_TEXT_MAX)
+        if pr_in_main:
+            # ステマ規制: フィードで本文だけを見た人にも広告と分かるよう、先頭に明示する
+            main_text = _truncate(f"{PR_LABEL}{main_text}", THREADS_TEXT_MAX)
+        reply = _fit_reply(build_reply(
+            item, day=day, sale_event=sale_event,
+            captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS, unit_note=has_unit,
+            include_point_note=not use_problem,  # 問題解決型は本文に入れたので重複させない
+        ), item.url, THREADS_TEXT_MAX)
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
-    return Thread(main_text, _truncate(reply, THREADS_TEXT_MAX), topic, key, feature, closing_type, has_unit)
+    return Thread(main_text, reply, topic, key, feature, closing_type, has_unit, link_in_main)
 
 
 def build_engagement_post(recent: list[str], template_weights: dict[str, float] | None = None) -> tuple[str, str]:
@@ -1354,6 +1416,7 @@ def main() -> int:
         sale_note: str | None = None
         pain_feature: str | None = None
         closing_type: str | None = None
+        link_in_main = False
         if slot.kind == "engage":
             main_text, key = build_engagement_post(recent, template_weights)
             topic: str | None = ENGAGEMENT_TOPIC
@@ -1368,10 +1431,12 @@ def main() -> int:
             sale_event = active_event(day, cfg.sale_events)
             thread = build_thread(item, name, category, recent, template_weights,
                                   day=day, sale_event=sale_event, keyword=keyword, style=cfg.post_style,
-                                  pr_in_main=cfg.pr_in_main, ask_ratio=cfg.ask_closing_ratio)
+                                  pr_in_main=cfg.pr_in_main, ask_ratio=cfg.ask_closing_ratio,
+                                  link_in_main_ratio=cfg.link_in_main_ratio)
             main_text, reply_text, topic, key = thread.main_text, thread.reply_text, thread.topic, thread.key
             pain_feature = thread.pain_feature
             closing_type = thread.closing_type
+            link_in_main = thread.link_in_main
             image_urls = item.image_urls[: cfg.max_images] if cfg.attach_images else ()
             sale_note = sale_event or point_day_note(day)
 
@@ -1411,7 +1476,7 @@ def main() -> int:
             main_text=main_text, reply_text=reply_text, item=item,
             name=name, category=category, keyword=keyword,
             image_count=len(image_urls), sale_note=sale_note, pain_feature=pain_feature,
-            closing_type=closing_type,
+            closing_type=closing_type, link_in_main=link_in_main,
         ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 

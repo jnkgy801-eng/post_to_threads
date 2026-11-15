@@ -32,11 +32,14 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 REPORT_DIR = DATA_DIR / "rakuten_reports"
 POST_LOG = DATA_DIR / "post_log.jsonl"
 OUT_FILE = DATA_DIR / "sales_weights.json"
+REPORT_FILE = DATA_DIR / "sales_report.md"
+METRICS_FILE = DATA_DIR / "threads_metrics.json"
 
 SHRINK_K = 3  # 紹介回数がこの回数ぶん、平均に寄せる
 WEIGHT_MIN, WEIGHT_MAX = 0.5, 2.0
 SHOP_COLUMN_HINTS = ("ショップ名", "ショップ", "店舗")
 REVENUE_COLUMN_HINTS = ("確定報酬", "発生報酬", "報酬", "売上")
+CLICK_COLUMN_HINTS = ("クリック",)
 
 
 class ReportError(RuntimeError):
@@ -71,19 +74,24 @@ def parse_yen(raw: str) -> float:
         return 0.0
 
 
-def load_revenue(paths: list[Path]) -> dict[str, float]:
+def load_revenue(paths: list[Path]) -> tuple[dict[str, float], dict[str, float]]:
+    """(ショップ別の報酬額, ショップ別のクリック数)。クリック列が無いCSVでは、クリックは空になる。"""
     revenue: dict[str, float] = defaultdict(float)
+    clicks: dict[str, float] = defaultdict(float)
     for path in paths:
         headers, rows = read_rows(path)
         shop_col = find_column(headers, SHOP_COLUMN_HINTS)
         rev_col = find_column(headers, REVENUE_COLUMN_HINTS)
         if not shop_col or not rev_col:
             raise ReportError(f"{path.name}: ショップ列/報酬列を判定できません。見つかった列: {headers}")
+        click_col = find_column(headers, CLICK_COLUMN_HINTS)
         for row in rows:
             name = (row.get(shop_col) or "").strip()
             if name:
                 revenue[name] += parse_yen(row.get(rev_col, ""))
-    return dict(revenue)
+                if click_col:
+                    clicks[name] += parse_yen(row.get(click_col, ""))
+    return dict(revenue), dict(clicks)
 
 
 def count_introductions() -> Counter[str]:
@@ -100,6 +108,43 @@ def count_introductions() -> Counter[str]:
         if shop:
             counts[shop] += 1
     return counts
+
+
+def shop_views() -> dict[str, int]:
+    """投稿ログ(post_log.jsonl)と threads_metrics.json を突き合わせた、ショップ別の閲覧数合計。"""
+    try:
+        metrics = json.loads(METRICS_FILE.read_text(encoding="utf-8"))
+        lines = POST_LOG.read_text(encoding="utf-8").splitlines()
+    except (OSError, json.JSONDecodeError):
+        return {}
+    views: dict[str, int] = defaultdict(int)
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        shop, m = entry.get("shop_name"), metrics.get(entry.get("buffer_post_id"))
+        if shop and isinstance(m, dict) and isinstance(m.get("views"), (int, float)):
+            views[shop] += int(m["views"])
+    return dict(views)
+
+
+def write_report(revenue: dict[str, float], clicks: dict[str, float], posts: Counter[str],
+                 views: dict[str, int], weights: dict[str, float]) -> None:
+    """閲覧 → クリック → 報酬 の流れをショップ別に1枚で見られるようにする(どこで離脱しているかの把握用)。"""
+    shops = sorted(posts, key=lambda sname: -revenue.get(sname, 0.0))
+    lines = ["# 売上レポート(ショップ別)", "",
+             f"更新: {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC", "",
+             "閲覧数はThreads、クリック・報酬は楽天アフィリエイトのCSVです。投稿単位ではなくショップ単位で突き合わせています。", "",
+             "| ショップ | 紹介回数 | 閲覧数 | クリック | クリック率 | 報酬(円) | 1回あたり報酬 | 重み |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for shop in shops[:30]:
+        v, c, r, n = views.get(shop, 0), clicks.get(shop), revenue.get(shop, 0.0), posts[shop]
+        ctr = f"{c / v * 100:.1f}%" if (c is not None and v) else "-"
+        lines.append(f"| {shop} | {n} | {v} | {'-' if c is None else f'{c:.0f}'} | {ctr} | {r:,.0f} | {r / n:,.0f} | {weights.get(shop, '-')} |")
+    lines += ["", "- クリック率が低い → 本文・画像・リプ欄誘導の改善余地(リーチは足りている)",
+              "- クリックはあるのに報酬が0 → 商品・価格・ページ側(CVR)の問題。ショップや価格帯の見直し", ""]
+    REPORT_FILE.write_text("\n".join(lines), encoding="utf-8")
 
 
 def build_weights(revenue: dict[str, float], posts: Counter[str]) -> dict[str, float]:
@@ -121,11 +166,14 @@ def main(argv: list[str]) -> int:
         print(f"CSVがありません。{REPORT_DIR} に楽天アフィリエイトのショップ別レポート(CSV)を置いてください。")
         return 0
     try:
-        revenue = load_revenue(paths)
+        revenue, clicks = load_revenue(paths)
     except (ReportError, OSError, csv.Error) as exc:
         print(f"[エラー] {exc}", file=sys.stderr)
         return 1
-    weights = build_weights(revenue, count_introductions())
+    posts = count_introductions()
+    weights = build_weights(revenue, posts)
+    if posts:
+        write_report(revenue, clicks, posts, shop_views(), weights)
     if not weights:
         print("報酬の合計が0、または紹介ログと突き合わせられるショップがありません。重みは更新しません。")
         return 0
