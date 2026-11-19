@@ -9,7 +9,7 @@ import random
 import re
 import sys
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -94,7 +94,8 @@ class ThreadTest(unittest.TestCase):
             t = sb.build_thread(item, kw, "daily", [], None, day=date(2026, 11, 16), keyword=kw, style="problem")
             self.assertLessEqual(len(t.main_text), sb.THREADS_TEXT_MAX)
             self.assertFalse(t.main_text.startswith(sb.PR_LABEL))  # 既定は本文にPRなし
-            self.assertEqual(t.closing_type, "cta")  # 既定は全て購入導線
+            self.assertEqual(t.closing_type, "ask")  # 既定は質問で締める(リプ欄誘導の本文は閲覧数が極端に低かった)
+            self.assertNotIn("リプ欄", t.main_text)
             self.assertIn(sb.PR_LABEL, t.reply_text)
             self.assertIn(item.url, t.reply_text)
             self.assertNotIn(item.url, t.main_text)  # リンクはリプ欄のみ
@@ -158,12 +159,90 @@ class LinkAndPointDayTest(unittest.TestCase):
 
     def test_point_day_is_in_main_once(self) -> None:
         item = make_item("電気毛布 洗える")
-        t = sb.build_thread(item, "電気毛布", "seasonal", [], None, day=date(2026, 11, 15), keyword="電気毛布")
+        t = sb.build_thread(item, "電気毛布", "seasonal", [], None, day=date(2026, 11, 15), keyword="電気毛布",
+                            ask_ratio=0.0)
         self.assertIn("5と0のつく日", t.main_text)
         self.assertIn("要エントリー", t.main_text)
         self.assertNotIn("5と0のつく日", t.reply_text or "")
-        t2 = sb.build_thread(item, "電気毛布", "seasonal", [], None, day=date(2026, 11, 17), keyword="電気毛布")
+        t2 = sb.build_thread(item, "電気毛布", "seasonal", [], None, day=date(2026, 11, 17), keyword="電気毛布",
+                             ask_ratio=0.0)
         self.assertNotIn("5と0のつく日", t2.main_text)
+        # 質問締め(既定)のときは、本文を広告っぽくしないためリプ欄に入れる
+        t3 = sb.build_thread(item, "電気毛布", "seasonal", [], None, day=date(2026, 11, 15), keyword="電気毛布")
+        self.assertNotIn("5と0のつく日", t3.main_text)
+        self.assertIn("5と0のつく日", t3.reply_text or "")
+
+
+BF = "2026-11-19T20:00..2026-11-25T01:59:楽天ブラックフライデー"
+
+
+class SaleWindowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.w = sb._parse_sale_windows(BF)
+        self.jst = sb.JST
+
+    def test_before_and_during_are_worded_differently(self) -> None:
+        before = sb.sale_text_for(datetime(2026, 11, 19, 12, 10, tzinfo=self.jst), self.w)
+        during = sb.sale_text_for(datetime(2026, 11, 19, 20, 15, tzinfo=self.jst), self.w)
+        self.assertIn("11/19 20:00から", before)
+        self.assertNotIn("開催中", before)  # 開始前に「開催中」と書かない
+        self.assertIn("開催中", during)
+        self.assertIn("対象・条件はリンク先でご確認ください", during)
+
+    def test_outside_window_has_no_text(self) -> None:
+        self.assertIsNone(sb.sale_text_for(datetime(2026, 11, 25, 7, 45, tzinfo=self.jst), self.w))  # 終了後
+        self.assertIsNone(sb.sale_text_for(datetime(2026, 11, 10, 12, 0, tzinfo=self.jst), self.w))  # 2日前より前
+
+    def test_date_level_events_end_on_previous_day_when_ends_early_morning(self) -> None:
+        (start, end, _), = sb._parse_sale_events(BF)
+        self.assertEqual((start, end), (date(2026, 11, 19), date(2026, 11, 24)))
+
+    def test_legacy_date_only_format_still_works(self) -> None:
+        (start, end, name), = sb._parse_sale_events("2026-12-04..2026-12-11:楽天スーパーSALE")
+        self.assertEqual((start, end, name), (date(2026, 12, 4), date(2026, 12, 11), "楽天スーパーSALE"))
+
+
+class EngageOfferTest(unittest.TestCase):
+    def setUp(self) -> None:
+        random.seed(1)
+
+    def test_reply_is_pr_labeled_factual_and_keeps_url(self) -> None:
+        item = make_item("洗濯洗剤 詰め替え 1000g", price=980)
+        for ceiling in (None, 1000):
+            reply = sb.build_engage_offer_reply(item, ceiling=ceiling, day=date(2026, 11, 20),
+                                                sale_text="楽天ブラックフライデー開催中(〜11/25 01:59)。対象・条件はリンク先でご確認ください")
+            self.assertTrue(reply.startswith(sb.PR_LABEL))
+            self.assertTrue(reply.endswith(item.url))
+            self.assertLessEqual(len(reply), sb.THREADS_TEXT_MAX)
+            self.assertIsNone(BANNED.search(reply), reply)
+        self.assertIn("1,000円以内", sb.build_engage_offer_reply(item, ceiling=1000, day=None, sale_text=None))
+
+    def test_ceiling_claim_only_when_price_fits(self) -> None:
+        item = make_item("x", price=1500)
+        reply = sb.build_engage_offer_reply(item, ceiling=1000, day=None, sale_text=None)
+        self.assertNotIn("1,000円以内", reply)  # 超過していたら「◯円以内」と言わない
+
+    def test_offer_specs_match_question_ceilings(self) -> None:
+        questions = dict(sb.ENGAGEMENT_QUESTIONS)
+        for qid, spec in sb.ENGAGE_OFFERS.items():
+            self.assertIn(qid, questions)
+            self.assertLessEqual(spec.min_price, spec.max_price)
+            if spec.ceiling is not None:
+                self.assertEqual(spec.max_price, spec.ceiling)  # 質問文の上限=探す価格の上限
+                self.assertIn(f"{spec.ceiling:,}円以内", questions[qid])
+            for niche in spec.niches:
+                self.assertTrue(niche == "seasonal" or niche in sb.NICHE_KEYWORDS, niche)
+
+    def test_sale_questions_format(self) -> None:
+        for _id, text in sb.ENGAGE_SALE_QUESTIONS:
+            out = text.format(event="楽天ブラックフライデー")
+            self.assertNotIn("{", out)
+            self.assertLessEqual(len(out), sb.THREADS_TEXT_MAX)
+            self.assertIsNone(BANNED.search(out), out)
+
+    def test_defaults_prefer_reach(self) -> None:
+        self.assertEqual(sb.DEFAULT_ASK_CLOSING_RATIO, 1.0)
+        self.assertEqual({i for i, _ in sb.PS_FRAMES}, {6, 7, 11})
 
 
 class UrlSafetyTest(unittest.TestCase):

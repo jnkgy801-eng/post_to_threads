@@ -274,6 +274,9 @@ def build_rows(log: list[dict[str, Any]], metrics: dict[str, dict[str, Any]], no
         row = dict(e)
         for name in ("views", "likes", "replies", "reposts", "quotes"):
             row[name] = int(rec.get(name) or 0)
+        if e.get("reply_text"):
+            # 本文+リプ欄リンクはThreads上で「自分の返信1件」になり、replies に含まれる。他人からの返信だけを数える
+            row["replies"] = max(0, row["replies"] - 1)
         rows.append(row)
     return rows
 
@@ -400,6 +403,14 @@ def build_report(rows: list[dict[str, Any]], fb: dict[str, Any], now: datetime, 
         out += _table(appeal, lambda r: yn(r.get("sale_note")), "5と0のつく日などの注記")
         out += _table(appeal, lambda r: r.get("closing_type"), "締めの種類(cta=リプ欄誘導 / ask=質問)")
         out += _table(appeal, lambda r: "本文" if r.get("link_in_main") else "リプ欄", "リンクの位置")
+
+    # 質問のみ投稿: 商品リプ(自分への返信でリンクを置く)あり/なしで閲覧数が変わるか。変わらなければ、リプ付きの質問を増やすのが収益化の近道
+    engage = [r for r in rows if r.get("kind") == "engage"]
+    if any(r.get("offer") for r in engage):
+        out += ["## 質問のみ投稿の内訳", ""]
+        out += _table(engage, lambda r: "商品リプあり" if r.get("offer") else "商品リプなし", "商品リプの有無")
+    if any(r.get("topic") for r in product):
+        out += _table(product, lambda r: r.get("topic"), "商品投稿のトピックタグ別")
 
     shop_rows = defaultdict(list)
     for r in product:

@@ -217,8 +217,50 @@ ENGAGEMENT_QUESTIONS: list[Tpl] = [
     (15, "一人暮らしを始める人に「これだけは買っとけ」って言うなら何ですか？"),
     (16, "500円以内で「毎日使ってる」ものを教えてください！"),
     (17, "「もっと早く買えばよかった」と思った日用品、ありますか？"),
+    # --- 「◯円以内で『買ってよかった』」型(閲覧数の幾何平均が約2,100と、他の質問の約270の8倍だった)の派生 ---
+    (18, "2,000円以内で「買ってよかった」と思った日用品は何ですか？"),
+    (19, "300円以内で「地味に生活が楽になった」ものを教えてください！"),
+    (20, "5,000円以内で「もっと早く買えばよかった」と思った家電は？"),
+    (21, "1,500円以内で「ついリピートしてる」ものはありますか？"),
 ]
 ENGAGEMENT_TOPIC = "暮らし"
+
+# 質問のみ投稿の「商品つき」化。閲覧は取れているのに商品リンクが無い(=収益ゼロ)質問に、自分への返信として商品を1つ置く。
+#   本文=質問(広告ではない) / リプ欄=【PR】つきの候補1つ(事実のみ)。体験の偽装はしない。
+@dataclass(frozen=True)
+class OfferSpec:
+    niches: tuple[str, ...]  # NICHE_KEYWORDS のキー、または "seasonal"
+    min_price: int
+    max_price: int
+    ceiling: int | None = None  # 質問文の「◯円以内」。リプ欄で「◯円以内の候補」と言えるのは price<=ceiling のときだけ(max_priceで保証)
+
+
+ENGAGE_OFFERS: dict[int, OfferSpec] = {
+    1: OfferSpec(("daily",), 1000, 4000),
+    3: OfferSpec(("daily", "clean"), 1000, 4000),
+    4: OfferSpec(("clean",), 1000, 4000),
+    10: OfferSpec(("food", "home", "clean"), 300, 1000, 1000),
+    12: OfferSpec(("seasonal", "daily"), 1000, 5000),
+    14: OfferSpec(("daily", "clean", "storage"), 1000, 3000, 3000),
+    15: OfferSpec(("daily", "clean"), 1000, 4000),
+    16: OfferSpec(("food", "clean"), 300, 500, 500),
+    17: OfferSpec(("daily", "storage"), 1000, 4000),
+    18: OfferSpec(("daily", "clean"), 1000, 2000, 2000),
+    20: OfferSpec(("seasonal", "gadget"), 3000, 5000, 5000),
+    21: OfferSpec(("daily", "food"), 500, 1500, 1500),
+}
+# セール期間(SALE_EVENTS)の質問。楽天ブラックフライデーのショップ買いまわりは「1ショップ税込1,000円以上」なので、1,000円以上の日用品を置く。
+ENGAGE_SALE_QUESTIONS: list[Tpl] = [
+    (1, "{event}、買いまわりの「あと1ショップ」で何を足しますか？\n①日用品 ②食品 ③コスメ ④ガジェット"),
+    (2, "{event}で「これは買う」と決めているもの、ありますか？\nもう買った人も教えてください！"),
+    (3, "{event}の「日用品まとめ買い」、洗剤やペーパー類はもう済ませましたか？\n①済んだ ②これから ③今回は見送り"),
+    (4, "去年の{event}で「買ってよかった」ものは何ですか？"),
+]
+SALE_OFFER = OfferSpec(("daily",), 1000, 4000)
+ENGAGE_OFFER_LEADS = (  # 「定番」「人気」など、事実で裏づけられない評価語は入れない(評価・件数は次の行に事実として出す)
+    "選ぶ目安に、候補をひとつ置いておきます👇",
+    "参考までに、候補をひとつ置いておきます👇",
+)
 
 # トピックタグ(Threadsは1投稿1タグ)。ジャンルごとの広めのタグ。seasonalは商品名を使う。
 CATEGORY_TOPIC = {
@@ -239,14 +281,12 @@ VALID_POST_STYLES = ("problem", "question", "mixed")
 # 旧フレーム(ID 1〜5)は「悩み→選択肢になりそう→質問」で閲覧・返信は狙えるが、購入の後押し(根拠・次の行動)が弱かった。
 # ID 6〜 は「悩み → 解決の根拠 → 判断材料(評価/送料/単価) → リプ欄へ誘導」の購入導線型。IDは固定で、旧IDは欠番として残す。
 #   {problem}=悩み / {solution}=解決の根拠(商品ページの仕様ワード) / {proof}=判断材料(事実のみ) / {cta}=次の行動
+# ID 8(「↓」)・9(冒頭が商品名+価格の仕様表)・10(「▼判断材料」)・12(「【チェック】」)は、広告・仕様表に見える冒頭で
+# 閲覧数が1〜26まで落ちたため外した(IDは欠番のまま)。
 PS_FRAMES: list[Tpl] = [
     (6, "{problem}\n\n{solution}\n{proof}\n\n{cta}"),
     (7, "{n}で、こんな悩みありませんか？\n{problem}\n\n{solution}\n{proof}\n\n{cta}"),
-    (8, "{problem}\n↓\n{solution}\n{proof}\n\n{cta}"),
-    (9, "{n}\n{proof}\n\n{problem}\n{solution}\n{cta}"),
-    (10, "{problem}\n{solution}\n\n▼判断材料\n{proof}\n\n{cta}"),
     (11, "{n}を探している人へ。\n{problem}\n{solution}\n{proof}\n\n{cta}"),
-    (12, "【チェック】{n}\n{problem}\n{solution}\n{proof}\n\n{cta}"),
 ]
 # 解決策の一言。{feat} は商品名/キャッチコピーに実在した仕様ワード(例: 静音)。断定はせず「合いそう」で結ぶ。
 PS_SOLUTIONS_FEATURE = (
@@ -279,7 +319,9 @@ PS_CLOSINGS = (
     "ほかにおすすめの方法があれば、教えてください🙏",
     "{n}選びで気にしていること、聞きたいです👇",
 )
-DEFAULT_ASK_CLOSING_RATIO = 0.0
+# 分析(2026-11-18): 「リプ欄に置きました👇」で締める購入導線型(cta)は閲覧数の中央値が6(n=3)まで落ち、
+# 質問で締める従来型(約100)・質問のみ投稿(約320)より大幅に低かった。本文は「会話の入口」、リンクはリプ欄の商品情報、と役割を分ける。
+DEFAULT_ASK_CLOSING_RATIO = 1.0
 REVIEW_PROOF_MIN = 100  # レビュー件数がこれ未満なら、判断材料として本文に出さない(少数の高評価は信頼材料になりにくい)
 PAIN_MATCH_BONUS = 1.15  # 悩みに応える仕様ワードを持つ商品を、選定スコアで少しだけ優遇する
 
@@ -331,6 +373,9 @@ class Config:
     pr_in_main: bool = False
     ask_closing_ratio: float = DEFAULT_ASK_CLOSING_RATIO
     link_in_main_ratio: float = 0.0
+    sale_windows: tuple[tuple[datetime, datetime, str], ...] = ()  # 時刻つきのセール期間(開始前/開催中の言い分け用)
+    engage_offer_ratio: float = 0.6  # 質問のみ投稿のうち、商品を1つ添える割合(残りは比較用の対照)
+    product_life_topic_ratio: float = 0.5  # 商品投稿のトピックタグを、広い「暮らし」にする割合(タグ別の閲覧数比較用)
 
 
 @dataclass(frozen=True)
@@ -395,21 +440,52 @@ def _parse_dates(raw: str) -> frozenset[date]:
     return frozenset(out)
 
 
-def _parse_sale_events(raw: str) -> tuple[tuple[date, date, str], ...]:
-    """'2026-12-04..2026-12-11:楽天スーパーSALE,2026-11-20..2026-11-27:ブラックフライデー' 形式。"""
-    events: list[tuple[date, date, str]] = []
+def _parse_sale_windows(raw: str) -> tuple[tuple[datetime, datetime, str], ...]:
+    """'2026-11-19T20:00..2026-11-25T01:59:楽天ブラックフライデー' 形式(時刻は省略可。省略時は開始00:00・終了23:59)。"""
+    windows: list[tuple[datetime, datetime, str]] = []
+    pat = r"(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}))?\.\.(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}))?:(.+)"
     for token in (t.strip() for t in raw.split(",") if t.strip()):
-        m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2}):(.+)", token)
+        m = re.fullmatch(pat, token)
         if not m:
-            raise ConfigError(f"SALE_EVENTS の形式が不正です(開始..終了:名前): {token!r}")
+            raise ConfigError(f"SALE_EVENTS の形式が不正です(開始[THH:MM]..終了[THH:MM]:名前): {token!r}")
         try:
-            start, end = date.fromisoformat(m.group(1)), date.fromisoformat(m.group(2))
+            start = datetime.fromisoformat(f"{m.group(1)}T{m.group(2) or '00:00'}").replace(tzinfo=JST)
+            end = datetime.fromisoformat(f"{m.group(3)}T{m.group(4) or '23:59'}").replace(tzinfo=JST)
         except ValueError as exc:
             raise ConfigError(f"SALE_EVENTS の日付が不正です: {token!r}") from exc
         if start > end:
-            raise ConfigError(f"SALE_EVENTS の開始日が終了日より後です: {token!r}")
-        events.append((start, end, m.group(3).strip()))
+            raise ConfigError(f"SALE_EVENTS の開始が終了より後です: {token!r}")
+        windows.append((start, end, m.group(5).strip()))
+    return tuple(windows)
+
+
+def _parse_sale_events(raw: str) -> tuple[tuple[date, date, str], ...]:
+    """日付単位のセール期間。終了が早朝(6時前)なら、投稿できる最終日は前日として扱う。"""
+    events = []
+    for start, end, name in _parse_sale_windows(raw):
+        last = end.date() - timedelta(days=1) if end.hour < 6 else end.date()
+        events.append((start.date(), max(last, start.date()), name))
     return tuple(events)
+
+
+def sale_window_at(at: datetime, windows: tuple[tuple[datetime, datetime, str], ...]
+                   ) -> tuple[str, bool, datetime, datetime] | None:
+    """at が「開始2日前〜終了」に入るセール。(名前, 開始済みか, 開始, 終了)。"""
+    for start, end, name in windows:
+        if start - timedelta(days=2) <= at <= end:
+            return name, at >= start, start, end
+    return None
+
+
+def sale_text_for(at: datetime, windows: tuple[tuple[datetime, datetime, str], ...]) -> str | None:
+    """リプ欄の注記。開始前に「開催中」と書かないよう、時刻で言い分ける。対象・条件は断定しない。"""
+    hit = sale_window_at(at, windows)
+    if not hit:
+        return None
+    name, started, start, end = hit
+    if not started:
+        return f"{name}は{start.month}/{start.day} {start:%H:%M}から。対象・条件はリンク先でご確認ください"
+    return f"{name}開催中(〜{end.month}/{end.day} {end:%H:%M})。対象・条件はリンク先でご確認ください"
 
 
 def _env_ratio(name: str, default: float) -> float:
@@ -453,14 +529,15 @@ def load_config() -> Config:
         rakuten_affiliate_id=os.environ["RAKUTEN_AFFILIATE_ID"].strip(),
         buffer_api_key=os.environ["BUFFER_API_KEY"].strip(),
         buffer_channel_id=os.environ.get("BUFFER_CHANNEL_ID", "").strip(),
-        slots=_parse_slots(os.environ.get("POST_SLOTS_JST", "").strip() or "12:10,18:00,20:15"),
-        engage_slots=_parse_engage_slots(os.environ.get("ENGAGE_SLOTS_JST", "").strip() or "07:45,22:15"),
-        slots_weekend=_parse_slots(os.environ.get("POST_SLOTS_WEEKEND_JST", "").strip() or "15:30,18:00,20:15"),
+        slots=_parse_slots(os.environ.get("POST_SLOTS_JST", "").strip() or "12:10,20:15"),
+        engage_slots=_parse_engage_slots(os.environ.get("ENGAGE_SLOTS_JST", "").strip() or "07:45,18:00,22:15"),
+        slots_weekend=_parse_slots(os.environ.get("POST_SLOTS_WEEKEND_JST", "").strip() or "15:30,20:15"),
         engage_slots_weekend=_parse_engage_slots(
-            os.environ.get("ENGAGE_SLOTS_WEEKEND_JST", "").strip() or "09:30,22:15"),
+            os.environ.get("ENGAGE_SLOTS_WEEKEND_JST", "").strip() or "09:30,18:00,22:15"),
         holidays=_parse_dates(os.environ.get("HOLIDAYS_JST", "")),
         sale_events=_parse_sale_events(os.environ.get("SALE_EVENTS", "")),
-        attach_images=os.environ.get("ATTACH_IMAGES", "").strip().lower() not in {"0", "false", "no"},
+        # 商品画像つきの商品投稿は閲覧数が低め(幾何平均73 vs 画像なし110)だったため、既定は画像なし
+        attach_images=os.environ.get("ATTACH_IMAGES", "").strip().lower() in {"1", "true", "yes"},
         max_images=_env_int("MAX_IMAGES", 3, minimum=1),
         post_style=_parse_post_style(os.environ.get("POST_STYLE", "").strip().lower() or DEFAULT_POST_STYLE),
         niches=_parse_niches(os.environ.get("NICHES", "").strip() or DEFAULT_NICHES),
@@ -478,6 +555,9 @@ def load_config() -> Config:
         pr_in_main=os.environ.get("PR_IN_MAIN", "").strip().lower() in {"1", "true", "yes"},
         ask_closing_ratio=_env_ratio("ASK_CLOSING_RATIO", DEFAULT_ASK_CLOSING_RATIO),
         link_in_main_ratio=_env_ratio("LINK_IN_MAIN_RATIO", 0.0),
+        sale_windows=_parse_sale_windows(os.environ.get("SALE_EVENTS", "")),
+        engage_offer_ratio=_env_ratio("ENGAGE_OFFER_RATIO", 0.6),
+        product_life_topic_ratio=_env_ratio("PRODUCT_LIFE_TOPIC_RATIO", 0.5),
     )
     if cfg.min_price > cfg.max_price:
         raise ConfigError("MIN_PRICE が MAX_PRICE を超えています")
@@ -589,7 +669,8 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
                    name: str | None, category: str | None, keyword: str | None,
                    image_count: int = 0, sale_note: str | None = None,
                    pain_feature: str | None = None, closing_type: str | None = None,
-                   link_in_main: bool = False) -> dict[str, Any]:
+                   link_in_main: bool = False, offer: bool = False,
+                   offer_ceiling: int | None = None) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "logged_at": datetime.now(JST).isoformat(timespec="seconds"),
         "buffer_post_id": post_id,
@@ -609,6 +690,8 @@ def make_log_entry(*, post_id: str, due: datetime, kind: str, key: str, topic: s
         "pain_feature": pain_feature,  # 問題解決型で、解決策の根拠にした仕様ワード(根拠あり/なしの比較用)
         "link_in_main": link_in_main,  # 本文にリンクを置いたか(リプ欄誘導との比較)
         "closing_type": closing_type,  # cta(リプ欄誘導) / ask(質問)。購入導線と返信狙いの比較用
+        "offer": offer,  # 質問のみ投稿に商品リプを添えたか(添えない質問との閲覧数比較用)
+        "offer_ceiling": offer_ceiling,
     }
     if item:
         entry.update(
@@ -1024,7 +1107,7 @@ class Thread:
 
 def build_reply(item: Item, *, day: date | None, sale_event: str | None,
                 captions: tuple[str, ...] = REPLY_CAPTIONS, unit_note: bool = False,
-                include_point_note: bool = True) -> str:
+                include_point_note: bool = True, extra: str = "", sale_text: str | None = None) -> str:
     """リンク入りのリプライ。評価・送料・価格を1行に並べて判断材料を渡す。"""
     short_name = _truncate(clean_item_name(item.name), 26)
     parts = []
@@ -1037,12 +1120,15 @@ def build_reply(item: Item, *, day: date | None, sale_event: str | None,
     if item.review_count and item.review_count >= 1000:
         caption = f"レビュー{item.review_count:,}件の商品です👇"  # APIの値のみ使う(事実に限る)
     note = point_day_note(day) if (day and include_point_note) else None
-    if sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
+    if sale_text:  # 開始前/開催中を時刻つきで正しく言い分けた文(sale_text_for)。対象は断定しない
+        note = f"{sale_text}\n{note}" if note else sale_text
+    elif sale_event:  # 対象かどうかは断定できないので、リンク先での確認を促す
         note = f"{sale_event}期間です。対象・条件はリンク先でご確認ください"
     head = f"{note}\n{caption}" if note else caption
     tail = ("\n※単価は掲載価格÷数量の目安です。比較は予約時点の楽天検索結果が対象で、送料・クーポンは含みません"
             if unit_note else "")
-    return f"{head}\n{PR_LABEL}{short_name}\n{' / '.join(parts)}{tail}\n※価格・在庫は変動します\n{item.url}"
+    facts = " / ".join(parts) + (f"\n{extra}" if extra else "")
+    return f"{head}\n{PR_LABEL}{short_name}\n{facts}{tail}\n※価格・在庫は変動します\n{item.url}"
 
 
 def build_solution_line(item: Item, name: str, feature: str | None) -> str:
@@ -1074,12 +1160,14 @@ def build_problem_solution_main(item: Item, name: str, keyword: str | None, rece
     )
     use_ask = random.random() < ask_ratio and not link_in_main
     closing_type = "ask" if use_ask else "cta"
+    if use_ask:  # 本文は会話の入口に徹する。評価・単価・価格などの判断材料はリプ欄の商品情報に置く
+        proof, has_unit = "", False
     if use_ask:
         cta = random.choice(PS_CLOSINGS).format(n=name)
     else:
         cta = random.choice(OFFER_CTAS_MAIN if link_in_main else OFFER_CTAS)
-    point_note = point_day_note(day) if day else None
-    if point_note:  # 「今日は5と0のつく日」は購入の背中を押す事実なので、本文の締めの直前に入れる
+    point_note = point_day_note(day) if (day and not use_ask) else None
+    if point_note:  # 「今日は5と0のつく日」は購入の背中を押す事実なので、本文の締めの直前に入れる(質問締めのときはリプ欄へ)
         cta = f"{point_note}\n{cta}"
     main_text = frame.format(
         n=name,
@@ -1120,7 +1208,7 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
                  day: date | None = None, sale_event: str | None = None,
                  keyword: str | None = None, style: str = DEFAULT_POST_STYLE,
                  pr_in_main: bool = False, ask_ratio: float = DEFAULT_ASK_CLOSING_RATIO,
-                 link_in_main_ratio: float = 0.0) -> Thread:
+                 link_in_main_ratio: float = 0.0, sale_text: str | None = None) -> Thread:
     """
     本文は既定でリンクなし(リンクはリプ欄)。style=problem は購入導線型、question は質問、mixed は半々。
     link_in_main_ratio: 本文にリンクを置く実験の割合。長さ超過・単価表示ありの場合はリプ欄方式に戻す。
@@ -1155,10 +1243,16 @@ def build_thread(item: Item, name: str, category: str, recent: list[str],
         if pr_in_main:
             # ステマ規制: フィードで本文だけを見た人にも広告と分かるよう、先頭に明示する
             main_text = _truncate(f"{PR_LABEL}{main_text}", THREADS_TEXT_MAX)
+        reply_extra = ""
+        if use_problem and closing_type == "ask":  # 質問締めのときは、単価・割安の根拠(事実)をリプ欄に置く
+            reply_extra = "\n".join(t for t in (unit_price_text(item), deal_text(item)) if t)
+            has_unit = unit_price_text(item) is not None
         reply = _fit_reply(build_reply(
             item, day=day, sale_event=sale_event,
             captions=PS_REPLY_CAPTIONS if use_problem else REPLY_CAPTIONS, unit_note=has_unit,
-            include_point_note=not use_problem,  # 問題解決型は本文に入れたので重複させない
+            # 購入導線(cta)型は本文に入れたので重複させない。質問締め・質問型はリプ欄に入れる
+            include_point_note=(not use_problem) or closing_type == "ask",
+            extra=reply_extra, sale_text=sale_text,
         ), item.url, THREADS_TEXT_MAX)
     topic = sanitize_topic(name if category in ("seasonal", "general") else CATEGORY_TOPIC.get(category, name))
     return Thread(main_text, reply, topic, key, feature, closing_type, has_unit, link_in_main)
@@ -1168,6 +1262,39 @@ def build_engagement_post(recent: list[str], template_weights: dict[str, float] 
     """商品なしの質問のみ投稿。(本文, テンプレートキー)"""
     key, text = _pick_fresh([(f"q:{i}", t) for i, t in ENGAGEMENT_QUESTIONS], recent, template_weights)
     return _truncate(text, THREADS_TEXT_MAX), key
+
+
+def build_sale_engagement_post(event: str, recent: list[str],
+                               template_weights: dict[str, float] | None = None) -> tuple[str, str]:
+    """セール期間の質問のみ投稿。(本文, テンプレートキー \"qs:N\")"""
+    key, text = _pick_fresh([(f"qs:{i}", t) for i, t in ENGAGE_SALE_QUESTIONS], recent, template_weights)
+    return _truncate(text.format(event=event), THREADS_TEXT_MAX), key
+
+
+def offer_pool(spec: OfferSpec, now: datetime) -> list[tuple[str, str, str]]:
+    pool: list[tuple[str, str, str]] = []
+    for niche in spec.niches:
+        pairs = SEASONAL_KEYWORDS[now.month] if niche == "seasonal" else NICHE_KEYWORDS[niche]
+        pool += [(q, name, niche) for q, name in pairs]
+    return pool
+
+
+def build_engage_offer_reply(item: Item, *, ceiling: int | None, day: date | None, sale_text: str | None) -> str:
+    """質問への「自分の返信」。候補を1つ、事実(評価・送料・価格)だけで置く。体験談・効能は書かない。"""
+    short_name = _truncate(clean_item_name(item.name), 26)
+    parts = []
+    if item.review_avg is not None and item.review_count:
+        parts.append(f"★{item.review_avg:.1f}({item.review_count:,}件)")
+    if item.postage_free:
+        parts.append("送料無料")
+    parts.append(f"{item.price:,}円")
+    lead = (f"{ceiling:,}円以内の候補を、ひとつ置いておきます👇" if ceiling and item.price <= ceiling
+            else random.choice(ENGAGE_OFFER_LEADS))
+    notes = [n for n in (sale_text, point_day_note(day) if day else None) if n]
+    note_block = ("\n".join(notes) + "\n") if notes else ""
+    reply = (f"{PR_LABEL}{lead}\n{short_name}\n{' / '.join(parts)}\n{note_block}"
+             f"※価格・在庫は変動します\n{item.url}")
+    return _fit_reply(reply, item.url, THREADS_TEXT_MAX)
 
 
 # ----------------------------- 投稿枠 ----------------------------------------
@@ -1417,9 +1544,28 @@ def main() -> int:
         pain_feature: str | None = None
         closing_type: str | None = None
         link_in_main = False
+        offer = False
+        offer_ceiling: int | None = None
         if slot.kind == "engage":
-            main_text, key = build_engagement_post(recent, template_weights)
+            window = sale_window_at(slot.at, cfg.sale_windows)
+            if window and random.random() < 0.5:  # セール期間は半分をセール向けの質問にする
+                main_text, key = build_sale_engagement_post(window[0], recent, template_weights)
+                spec: OfferSpec | None = SALE_OFFER
+                sale_note = window[0]
+            else:
+                main_text, key = build_engagement_post(recent, template_weights)
+                spec = ENGAGE_OFFERS.get(int(key.split(":")[1]))
             topic: str | None = ENGAGEMENT_TOPIC
+            if spec and random.random() < cfg.engage_offer_ratio:
+                offer_cfg = replace(cfg, min_price=spec.min_price, max_price=spec.max_price)
+                picked = select_item(offer_pool(spec, now), posted | chosen_now, offer_cfg, None, shop_weights)
+                if picked:
+                    item, name, _cat, keyword = picked
+                    reply_text = build_engage_offer_reply(
+                        item, ceiling=spec.ceiling, day=slot.at.date(), sale_text=sale_text_for(slot.at, cfg.sale_windows))
+                    offer, offer_ceiling = True, spec.ceiling
+                else:
+                    print(f"[情報] {slot.at:%m/%d %H:%M} の質問に添える商品が見つからず、質問のみで投稿します")
         else:
             picked = select_item(pool, posted | chosen_now, cfg, feedback, shop_weights)
             if not picked:
@@ -1432,13 +1578,16 @@ def main() -> int:
             thread = build_thread(item, name, category, recent, template_weights,
                                   day=day, sale_event=sale_event, keyword=keyword, style=cfg.post_style,
                                   pr_in_main=cfg.pr_in_main, ask_ratio=cfg.ask_closing_ratio,
-                                  link_in_main_ratio=cfg.link_in_main_ratio)
+                                  link_in_main_ratio=cfg.link_in_main_ratio,
+                                  sale_text=sale_text_for(slot.at, cfg.sale_windows))
             main_text, reply_text, topic, key = thread.main_text, thread.reply_text, thread.topic, thread.key
             pain_feature = thread.pain_feature
             closing_type = thread.closing_type
             link_in_main = thread.link_in_main
             image_urls = item.image_urls[: cfg.max_images] if cfg.attach_images else ()
             sale_note = sale_event or point_day_note(day)
+            if topic and random.random() < cfg.product_life_topic_ratio:
+                topic = ENGAGEMENT_TOPIC  # 広い「暮らし」タグでの閲覧数を比較する(トピック別の表で確認)
 
         due = slot.at + timedelta(minutes=random.randint(0, cfg.jitter_minutes))  # 機械的な定時投稿を避ける
         print(f"--- {due:%Y-%m-%d %H:%M} JST [{slot.kind}] topic={topic} ---\n{main_text}")
@@ -1477,6 +1626,7 @@ def main() -> int:
             name=name, category=category, keyword=keyword,
             image_count=len(image_urls), sale_note=sale_note, pain_feature=pain_feature,
             closing_type=closing_type, link_in_main=link_in_main,
+            offer=offer, offer_ceiling=offer_ceiling,
         ))
         time.sleep(1)  # Buffer APIのレート制限への配慮
 
